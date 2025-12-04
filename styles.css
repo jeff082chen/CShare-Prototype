@@ -382,6 +382,64 @@ body {
     margin: 0;
 }
 
+.item-borrowing-status {
+    margin: 20px 0;
+    padding: 15px;
+    background: var(--background);
+    border-radius: 8px;
+}
+
+.item-borrowing-status h3 {
+    font-size: 1rem;
+    color: var(--forest-green);
+    margin-bottom: 12px;
+}
+
+.booking-status {
+    padding: 12px;
+    margin: 8px 0;
+    border-radius: 6px;
+    border-left: 4px solid;
+    background: var(--surface);
+}
+
+.booking-status.active {
+    border-left-color: #ef4444;
+    background: #fef2f2;
+}
+
+.booking-status.upcoming {
+    border-left-color: #f59e0b;
+    background: #fffbeb;
+}
+
+.booking-status.available {
+    border-left-color: #10b981;
+    background: #f0fdf4;
+}
+
+.booking-status .status-indicator {
+    font-size: 0.8rem;
+    margin-right: 6px;
+}
+
+.booking-status strong {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--text-primary);
+}
+
+.booking-status p {
+    margin: 4px 0;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.booking-status small {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
 .detail-actions {
     display: flex;
     gap: 15px;
@@ -439,6 +497,39 @@ body {
     font-size: 0.85rem;
     color: var(--text-secondary);
     font-style: italic;
+}
+
+.checkbox-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.checkbox-group label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: normal;
+    cursor: pointer;
+}
+
+.checkbox-group input[type="checkbox"] {
+    width: auto;
+    cursor: pointer;
+}
+
+.time-range {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.time-range input {
+    flex: 1;
+}
+
+.time-range span {
+    color: var(--text-secondary);
 }
 
 input[type="range"] {

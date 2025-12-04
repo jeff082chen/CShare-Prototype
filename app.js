@@ -1480,6 +1480,15 @@ async function submitBookingRequest(event) {
 
     try {
         const lockIds = buildLockIds(currentItemId, startDate, endDate);
+        const conflictChecks = lockIds.map(id => getDoc(doc(db, 'bookingLocks', id)));
+        const snapshots = await Promise.all(conflictChecks);
+        const existingLocks = snapshots.filter(snap => snap.exists());
+
+        if (existingLocks.length > 0) {
+            alert('❌ Sorry, some of the dates you selected are already booked by others. Please choose different dates.');
+            return;
+        }
+
         const batch = writeBatch(db);
         const bookingRef = doc(collection(db, 'bookings'));
 
@@ -1495,7 +1504,7 @@ async function submitBookingRequest(event) {
             startDate: Timestamp.fromDate(startDate),
             endDate: Timestamp.fromDate(endDate),
             status: 'pending',
-            statusHistory: [{ status: 'pending', at: serverTimestamp(), by: currentUser.uid }],
+            statusHistory: [{ status: 'pending', at: Timestamp.now(), by: currentUser.uid }],
             lockIds,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp()
@@ -1525,7 +1534,7 @@ async function submitBookingRequest(event) {
 
         // Track booking attempt in session recording
         if (currentSessionId) {
-            trackBookingAttempt(currentItemId, item.name, startDateStr, endDateStr);
+            trackBookingAttempt(currentItemId, item.name, startDate, endDate);
         }
 
         closeBookingModal();
@@ -1860,7 +1869,7 @@ window.handleBookingAction = async function(bookingId, newStatus) {
         const bookingRef = doc(db, 'bookings', bookingId);
         await updateDoc(bookingRef, {
             status: newStatus,
-            statusHistory: arrayUnion({ status: newStatus, at: serverTimestamp(), by: currentUser.uid }),
+            statusHistory: arrayUnion({ status: newStatus, at: Timestamp.now(), by: currentUser.uid }),
             updatedAt: serverTimestamp()
         });
 

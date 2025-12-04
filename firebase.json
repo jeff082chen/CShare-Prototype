@@ -1,0 +1,21 @@
+{
+  "hosting": {
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**",
+      "functions/**",
+      "TESTING.md",
+      "TESTING_SUMMARY.md",
+      "TEST_REPORT.md",
+      "FIREBASE_SETUP.md",
+      "test.html",
+      "test.js",
+      "seed-data.js",
+      ".env.example",
+      "env.js.example"
+    ],
+    "rewrites": []
+  }
+}

@@ -90,9 +90,7 @@ service cloud.firestore {
     }
 
     match /bookings/{bookingId} {
-      allow read: if isEduUser() && 
-        (request.auth.uid == resource.data.ownerId || 
-         request.auth.uid == resource.data.renterId);
+      allow read: if isEduUser();
          
       allow create: if isEduUser() &&
         request.resource.data.renterId == request.auth.uid &&

@@ -398,8 +398,9 @@ async function getUnreadCount(chatId) {
     if (!currentUser || !chatId) return 0;
 
     try {
-        // Get chat metadata to find lastRead timestamp
-        const chatDoc = await getDoc(doc(db, 'chats', chatId));
+        // Get chat metadata to find lastRead timestamp (force server fetch to avoid cache)
+        const chatDocRef = doc(db, 'chats', chatId);
+        const chatDoc = await getDoc(chatDocRef);
         const lastReadTimestamp = chatDoc.exists()
             ? chatDoc.data()?.lastRead?.[currentUser.uid]
             : null;
@@ -854,7 +855,7 @@ window.showItemDetail = async function (itemId) {
 };
 
 // Open chat
-window.openChat = async function (itemId) {
+window.openChat = async function (itemId, forceChatId = null, fromView = null) {
     const item = window.currentItemData;
     if (!item) return;
 
@@ -869,14 +870,43 @@ window.openChat = async function (itemId) {
         trackChatOpen(itemId, item.name);
     }
 
-    const chatId = getChatId(itemId, currentUser.uid);
+    // Use forceChatId if provided, otherwise calculate chatId
+    const chatId = forceChatId || getChatId(itemId, currentUser.uid);
     currentChatId = chatId;
     currentItemId = itemId;
+
+    // Store where we came from for back navigation
+    if (fromView) {
+        window.chatPreviousView = fromView;
+    } else {
+        // If not specified, assume we came from item detail
+        window.chatPreviousView = null;
+    }
+
+    // Determine the other user for chat header
+    let otherUserName = item.ownerName;
+    if (forceChatId) {
+        // If current user is owner, the other user is the renter
+        if (currentUser.uid === item.ownerId) {
+            // Try to fetch the other user's name from chat metadata
+            try {
+                const chatRef = doc(db, 'chats', chatId);
+                const chatDoc = await getDoc(chatRef);
+                if (chatDoc.exists()) {
+                    const chatData = chatDoc.data();
+                    otherUserName = chatData.renterName || 'Renter';
+                }
+            } catch (error) {
+                console.error('Error fetching chat data:', error);
+                otherUserName = 'Renter';
+            }
+        }
+    }
 
     // Update chat header
     document.getElementById('chatHeader').innerHTML = `
         <div><strong>Chat about:</strong> ${item.name}</div>
-        <div><strong>With:</strong> ${item.ownerName}</div>
+        <div><strong>With:</strong> ${otherUserName}</div>
     `;
 
     // Mark messages as read
@@ -1209,7 +1239,9 @@ window.openChatFromList = async function(itemId, chatId) {
         }
 
         window.currentItemData = { id: itemDoc.id, ...itemDoc.data() };
-        await openChat(itemId);
+        // Pass the correct chatId from the list to avoid recalculation
+        // Also pass 'myChatsView' to indicate we came from the chats list
+        await openChat(itemId, chatId, 'myChatsView');
     } catch (error) {
         console.error('Error opening chat from list:', error);
         alert('Error opening chat');
@@ -3251,11 +3283,23 @@ function setupEventListeners() {
         if (unsubscribeTypingIndicator) {
             unsubscribeTypingIndicator();
         }
-        if (currentItemId) {
-            showItemDetail(currentItemId);
+
+        // Navigate back based on where we came from
+        if (window.chatPreviousView === 'myChatsView') {
+            // If we came from chat list, go back to chat list
+            // Add small delay to ensure server timestamp is processed
+            setTimeout(() => loadMyChats(), 100);
+        } else if (currentItemId) {
+            // If we came from item detail or previous view is not set, go to item detail
+            // Add small delay to ensure server timestamp is processed
+            setTimeout(() => showItemDetail(currentItemId), 100);
         } else {
+            // Fallback to home view
             showView('homeView');
         }
+
+        // Clean up the previous view tracker
+        window.chatPreviousView = null;
     });
 
     // Search

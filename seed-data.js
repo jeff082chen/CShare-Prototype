@@ -176,7 +176,10 @@ const seedItems = [
     }
 ];
 
-// Export for use in app.js
+// Make available globally for ES6 modules (app.js)
+window.seedItems = seedItems;
+
+// Export for use in Node.js if needed
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { seedItems };
 }

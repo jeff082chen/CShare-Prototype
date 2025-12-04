@@ -114,9 +114,9 @@ Two ways to create test listings:
 
 **Option 1: From Home Screen**
 - Click "🧪 Generate Test Listings" button
-- Generates 10 random listings
+- Generates 10 fake listings
 
-**Option 2: Using seed-data.html**
+**Option 2: Using seed-data.html** (deprecated)
 - Open [seed-data.html](seed-data.html) in browser
 - Follow on-screen instructions
 - Creates diverse test data

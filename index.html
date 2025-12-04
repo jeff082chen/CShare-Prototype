@@ -92,16 +92,124 @@
                         <input type="number" id="itemPrice" min="0" step="0.01" value="0" required>
                     </div>
                     <div class="form-group">
-                        <label for="availableFrom">Available From (optional)</label>
-                        <input type="date" id="availableFrom">
-                        <small class="form-hint">Leave empty if available immediately</small>
+                        <label for="availabilityType">Availability Type</label>
+                        <select id="availabilityType" onchange="toggleAvailabilityFields()">
+                            <option value="always">Always Available</option>
+                            <option value="dateRange">Specific Date Range</option>
+                            <option value="recurring">Recurring Schedule</option>
+                        </select>
+                    </div>
+                    <div id="dateRangeFields" style="display: none;">
+                        <div class="form-group">
+                            <label for="availableFrom">Available From</label>
+                            <input type="date" id="availableFrom">
+                        </div>
+                        <div class="form-group">
+                            <label for="availableUntil">Available Until</label>
+                            <input type="date" id="availableUntil">
+                            <small class="form-hint">Leave empty if no end date</small>
+                        </div>
+                    </div>
+                    <div id="recurringFields" style="display: none;">
+                        <div class="form-group">
+                            <label>Available Days of Week</label>
+                            <div class="checkbox-group">
+                                <label><input type="checkbox" id="day-monday" value="1"> Monday</label>
+                                <label><input type="checkbox" id="day-tuesday" value="2"> Tuesday</label>
+                                <label><input type="checkbox" id="day-wednesday" value="3"> Wednesday</label>
+                                <label><input type="checkbox" id="day-thursday" value="4"> Thursday</label>
+                                <label><input type="checkbox" id="day-friday" value="5"> Friday</label>
+                                <label><input type="checkbox" id="day-saturday" value="6"> Saturday</label>
+                                <label><input type="checkbox" id="day-sunday" value="0"> Sunday</label>
+                            </div>
+                        </div>
                     </div>
                     <div class="form-group">
-                        <label for="availableUntil">Available Until (optional)</label>
-                        <input type="date" id="availableUntil">
-                        <small class="form-hint">Leave empty if no end date</small>
+                        <label for="handoverTimeStart">Handover Time Window (Pickup/Return)</label>
+                        <div class="time-range">
+                            <input type="time" id="handoverTimeStart" placeholder="Start">
+                            <span>to</span>
+                            <input type="time" id="handoverTimeEnd" placeholder="End">
+                        </div>
+                        <small class="form-hint">Set times when you are available to hand over or receive the item each day (e.g., 18:00-22:00 for after work). Leave empty if flexible all day.</small>
                     </div>
                     <button type="submit" class="btn-primary">Create Listing</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Edit Item View -->
+        <div id="editItemView" class="view">
+            <button class="btn-back" id="backFromEditBtn">← Back</button>
+            <div class="form-container">
+                <h2>Edit Your Listing</h2>
+                <form id="editListingForm">
+                    <input type="hidden" id="editItemId">
+                    <div class="form-group">
+                        <label for="editItemName">Item Name</label>
+                        <input type="text" id="editItemName" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="editItemCategory">Category</label>
+                        <select id="editItemCategory" required>
+                            <option value="Appliances">Appliances</option>
+                            <option value="Electronics">Electronics</option>
+                            <option value="Furniture">Furniture</option>
+                            <option value="Kitchen">Kitchen</option>
+                            <option value="Other">Other</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="editItemDescription">Description</label>
+                        <textarea id="editItemDescription" rows="4" required></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="editItemPrice">Daily Rate (leave 0 for free)</label>
+                        <input type="number" id="editItemPrice" min="0" step="0.01" value="0" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="editAvailabilityType">Availability Type</label>
+                        <select id="editAvailabilityType" onchange="toggleEditAvailabilityFields()">
+                            <option value="always">Always Available</option>
+                            <option value="dateRange">Specific Date Range</option>
+                            <option value="recurring">Recurring Schedule</option>
+                        </select>
+                    </div>
+                    <div id="editDateRangeFields" style="display: none;">
+                        <div class="form-group">
+                            <label for="editAvailableFrom">Available From</label>
+                            <input type="date" id="editAvailableFrom">
+                        </div>
+                        <div class="form-group">
+                            <label for="editAvailableUntil">Available Until</label>
+                            <input type="date" id="editAvailableUntil">
+                            <small class="form-hint">Leave empty if no end date</small>
+                        </div>
+                    </div>
+                    <div id="editRecurringFields" style="display: none;">
+                        <div class="form-group">
+                            <label>Available Days of Week</label>
+                            <div class="checkbox-group">
+                                <label><input type="checkbox" id="edit-day-monday" value="1"> Monday</label>
+                                <label><input type="checkbox" id="edit-day-tuesday" value="2"> Tuesday</label>
+                                <label><input type="checkbox" id="edit-day-wednesday" value="3"> Wednesday</label>
+                                <label><input type="checkbox" id="edit-day-thursday" value="4"> Thursday</label>
+                                <label><input type="checkbox" id="edit-day-friday" value="5"> Friday</label>
+                                <label><input type="checkbox" id="edit-day-saturday" value="6"> Saturday</label>
+                                <label><input type="checkbox" id="edit-day-sunday" value="0"> Sunday</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="editHandoverTimeStart">Handover Time Window (Pickup/Return)</label>
+                        <div class="time-range">
+                            <input type="time" id="editHandoverTimeStart" placeholder="Start">
+                            <span>to</span>
+                            <input type="time" id="editHandoverTimeEnd" placeholder="End">
+                        </div>
+                        <small class="form-hint">Set times when you are available to hand over or receive the item each day (e.g., 18:00-22:00 for after work). Leave empty if flexible all day.</small>
+                    </div>
+                    <button type="submit" class="btn-primary">Save Changes</button>
                 </form>
             </div>
         </div>
@@ -459,7 +567,7 @@
             <h3>Test Data Management</h3>
             <p>Generate or clear test listings for demo purposes</p>
             <div class="test-actions">
-                <button class="btn-primary" id="generateFakeListingsBtn">🎲 Generate 10 Fake Listings</button>
+                <button class="btn-primary" id="generateFakeListingsBtn">🎲 Generate 12 Fake Listings</button>
                 <button class="btn-danger" id="clearMyListingsBtn">🗑️ Clear All My Listings</button>
                 <button class="btn-secondary" id="closeTestModalBtn">Cancel</button>
             </div>
@@ -468,6 +576,7 @@
 
     <!-- Load environment configuration before app.js -->
     <script src="env.js"></script>
+    <script src="seed-data.js"></script>
     <script type="module" src="app.js"></script>
 
 </body>

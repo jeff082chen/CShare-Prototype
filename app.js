@@ -806,20 +806,147 @@ window.showItemDetail = async function (itemId) {
         const unreadCount = chatId ? await getUnreadCount(chatId) : 0;
         const unreadBadge = unreadCount > 0 ? `<span class="unread-badge">${unreadCount}</span>` : '';
 
-        // Format availability dates
-        let availabilityHTML = '';
-        if (item.availability) {
-            const startDate = item.availability.startDate ? item.availability.startDate.toDate().toLocaleDateString() : 'Now';
-            const endDate = item.availability.endDate ? item.availability.endDate.toDate().toLocaleDateString() : 'Ongoing';
+        // Get current and upcoming bookings
+        let borrowingStatusHTML = '';
+        try {
+            const now = new Date();
+            const bookingsQuery = query(
+                collection(db, 'bookings'),
+                where('itemId', '==', itemId),
+                where('status', '==', 'accepted')
+            );
+            const bookingsSnapshot = await getDocs(bookingsQuery);
 
-            if (item.availability.startDate || item.availability.endDate) {
-                availabilityHTML = `
-                    <div class="item-availability">
-                        <h3>Availability</h3>
-                        <p>📅 ${startDate} - ${endDate}</p>
+            const activeBookings = [];
+            const upcomingBookings = [];
+
+            bookingsSnapshot.forEach(doc => {
+                const booking = doc.data();
+                const startDate = booking.startDate.toDate();
+                const endDate = booking.endDate.toDate();
+
+                if (now >= startDate && now <= endDate) {
+                    activeBookings.push({ ...booking, startDate, endDate });
+                } else if (startDate > now) {
+                    upcomingBookings.push({ ...booking, startDate, endDate });
+                }
+            });
+
+            // Sort upcoming bookings by start date
+            upcomingBookings.sort((a, b) => a.startDate - b.startDate);
+
+            if (activeBookings.length > 0 || upcomingBookings.length > 0) {
+                let statusContent = '';
+
+                if (activeBookings.length > 0) {
+                    const booking = activeBookings[0];
+                    statusContent += `
+                        <div class="booking-status active">
+                            <span class="status-indicator">🔴</span>
+                            <strong>Currently Borrowed</strong>
+                            <p>Until: ${booking.endDate.toLocaleDateString()}</p>
+                            <small>Borrowed by: ${booking.renterName}</small>
+                        </div>
+                    `;
+                }
+
+                if (upcomingBookings.length > 0) {
+                    const nextBookings = upcomingBookings.slice(0, 2);
+                    nextBookings.forEach(booking => {
+                        statusContent += `
+                            <div class="booking-status upcoming">
+                                <span class="status-indicator">🟡</span>
+                                <strong>Upcoming Booking</strong>
+                                <p>${booking.startDate.toLocaleDateString()} - ${booking.endDate.toLocaleDateString()}</p>
+                                <small>Reserved by: ${booking.renterName}</small>
+                            </div>
+                        `;
+                    });
+
+                    if (upcomingBookings.length > 2) {
+                        statusContent += `<small>+ ${upcomingBookings.length - 2} more upcoming booking(s)</small>`;
+                    }
+                }
+
+                borrowingStatusHTML = `
+                    <div class="item-borrowing-status">
+                        <h3>Borrowing Status</h3>
+                        ${statusContent}
+                    </div>
+                `;
+            } else {
+                borrowingStatusHTML = `
+                    <div class="item-borrowing-status">
+                        <h3>Borrowing Status</h3>
+                        <div class="booking-status available">
+                            <span class="status-indicator">🟢</span>
+                            <strong>Available</strong>
+                            <p>No active or upcoming bookings</p>
+                        </div>
                     </div>
                 `;
             }
+        } catch (error) {
+            console.error('Error fetching booking status:', error);
+        }
+
+        // Format availability dates
+        let availabilityHTML = '';
+        if (item.availability) {
+            const availability = item.availability;
+            let availabilityContent = '';
+
+            if (availability.type === 'recurring') {
+                const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                const selectedDays = availability.daysOfWeek.map(d => dayNames[d]).join(', ');
+                availabilityContent = `<p>📅 <strong>Available Days:</strong> ${selectedDays}</p>`;
+            } else if (availability.type === 'dateRange') {
+                const startDate = availability.startDate ? availability.startDate.toDate().toLocaleDateString() : 'Now';
+                const endDate = availability.endDate ? availability.endDate.toDate().toLocaleDateString() : 'Ongoing';
+                availabilityContent = `<p>📅 ${startDate} - ${endDate}</p>`;
+            } else {
+                availabilityContent = `<p>📅 <strong>Always Available</strong></p>`;
+            }
+
+            if (availabilityContent) {
+                availabilityHTML = `
+                    <div class="item-availability">
+                        <h3>Availability Schedule</h3>
+                        ${availabilityContent}
+                    </div>
+                `;
+            }
+        }
+
+        // Format handover time (separate from availability)
+        let handoverTimeHTML = '';
+        const handoverTime = item.handoverTime || {};
+
+        // Handle legacy data: check if timeStart/timeEnd exist in availability
+        const legacyTimeStart = item.availability?.timeStart;
+        const legacyTimeEnd = item.availability?.timeEnd;
+        const timeStart = handoverTime.start || legacyTimeStart;
+        const timeEnd = handoverTime.end || legacyTimeEnd;
+
+        if (timeStart && timeEnd) {
+            handoverTimeHTML = `
+                <div class="item-handover-time">
+                    <h3>Handover Time</h3>
+                    <div class="handover-time-box" style="background: #f0f9ff; padding: 12px; border-radius: 6px; border-left: 3px solid #3b82f6;">
+                        <p style="margin: 0;">🕐 <strong>${timeStart} - ${timeEnd}</strong></p>
+                        <small style="color: #666; display: block; margin-top: 6px;">
+                            Please coordinate pickup & return within these hours each day
+                        </small>
+                    </div>
+                </div>
+            `;
+        } else {
+            handoverTimeHTML = `
+                <div class="item-handover-time">
+                    <h3>Handover Time</h3>
+                    <p>🕐 <strong>Flexible</strong> - Coordinate with owner</p>
+                </div>
+            `;
         }
 
         const detailContent = document.getElementById('itemDetailContent');
@@ -833,13 +960,15 @@ window.showItemDetail = async function (itemId) {
                 <h3>Description</h3>
                 <p>${item.description}</p>
             </div>
+            ${borrowingStatusHTML}
             ${availabilityHTML}
+            ${handoverTimeHTML}
             <div class="item-owner">
                 <strong>Listed by:</strong> ${item.ownerName} (${item.ownerEmail})
             </div>
             <div class="detail-actions">
                 ${isOwner ?
-                '<button class="btn-secondary" onclick="showView(\'homeView\')">Back to Listings</button>' :
+                `<button class="btn-primary" onclick="editItem('${itemId}')">✏️ Edit Listing</button><button class="btn-secondary" onclick="showView('homeView')">Back to Listings</button>` :
                 `<button class="btn-primary" onclick="openBookingModal('${itemId}')">📅 Request to Book</button>
                      <button class="btn-primary chat-btn-with-badge" onclick="openChat('${itemId}')">💬 Chat with Owner${unreadBadge}</button>
                      <button class="btn-secondary" onclick="showView('homeView')">Back</button>`
@@ -1252,7 +1381,41 @@ window.openChatFromList = async function(itemId, chatId) {
 // Open booking modal
 window.openBookingModal = function(itemId) {
     currentItemId = itemId;
+    const item = window.currentItemData; // Get current item data
     const modal = document.getElementById('bookingModal');
+
+    // Remove any existing handover notice
+    const oldNotice = modal.querySelector('.booking-notice');
+    if (oldNotice) oldNotice.remove();
+
+    // Add handover time notice if applicable
+    if (item) {
+        const handoverTime = item.handoverTime || {};
+        // Handle legacy data
+        const legacyTimeStart = item.availability?.timeStart;
+        const legacyTimeEnd = item.availability?.timeEnd;
+        const timeStart = handoverTime.start || legacyTimeStart;
+        const timeEnd = handoverTime.end || legacyTimeEnd;
+
+        if (timeStart && timeEnd) {
+            const timeNoticeHTML = `
+                <div class="booking-notice" style="background: #fffbeb; padding: 12px; border-radius: 6px; margin-bottom: 15px; border-left: 4px solid #f59e0b; font-size: 0.9rem;">
+                    <strong>⚠️ Owner's Handover Time</strong>
+                    <p style="margin: 6px 0 0 0;">
+                        Please ensure you can pick up and return the item between
+                        <strong>${timeStart} - ${timeEnd}</strong> each day.
+                    </p>
+                </div>
+            `;
+
+            // Insert notice after the modal title
+            const modalTitle = modal.querySelector('.modal-content h3');
+            if (modalTitle) {
+                modalTitle.insertAdjacentHTML('afterend', timeNoticeHTML);
+            }
+        }
+    }
+
     modal.classList.add('active');
 
     // Set minimum date to today
@@ -1361,35 +1524,49 @@ async function savePreferences(event) {
 
 // Test Listings Functions
 function generateFakeListingsData() {
-    const fakeItems = [
-        { name: "Professional Coffee Maker", category: "Kitchen", description: "High-end espresso machine with milk frother and programmable settings. Perfect for coffee enthusiasts.", price: 12 },
-        { name: "Wireless Gaming Headset", category: "Electronics", description: "Surround sound gaming headset with noise cancellation and RGB lighting. Compatible with all major platforms.", price: 8 },
-        { name: "Modern Floor Lamp", category: "Furniture", description: "Adjustable LED floor lamp with remote control and multiple brightness settings. Great for reading corners.", price: 6 },
-        { name: "Air Fryer XL", category: "Kitchen", description: "7-quart capacity air fryer with digital controls and preset cooking functions. Healthy cooking made easy.", price: 10 },
-        { name: "Portable Bluetooth Speaker", category: "Electronics", description: "Waterproof speaker with 20-hour battery life and premium sound quality. Perfect for outdoor activities.", price: 7 },
-        { name: "Ergonomic Office Chair", category: "Furniture", description: "Adjustable lumbar support office chair with breathable mesh and armrests. Promotes better posture.", price: 9 },
-        { name: "Robot Vacuum Cleaner", category: "Appliances", description: "Smart robot vacuum with app control and automatic charging. Works on carpets and hard floors.", price: 13 },
-        { name: "Electric Kettle", category: "Kitchen", description: "Fast-boiling electric kettle with temperature control and auto shut-off. 1.7L capacity.", price: 5 },
-        { name: "Portable Monitor", category: "Electronics", description: "15.6 inch USB-C portable monitor for laptops. Perfect for dual-screen productivity on the go.", price: 11 },
-        { name: "Storage Ottoman", category: "Furniture", description: "Multi-functional storage ottoman that doubles as seating. Faux leather upholstery with hidden storage.", price: 0 }
-    ];
+    // Helper function to get date X days from now
+    function getDaysFromNow(days) {
+        if (days === null) return null;
+        const date = new Date();
+        date.setDate(date.getDate() + days);
+        return date;
+    }
 
-    return fakeItems.map(item => ({
-        name: item.name,
-        category: item.category,
-        description: item.description,
-        price: item.price,
-        emoji: itemEmojis[item.category],
-        ownerId: currentUser.uid,
-        ownerName: currentUser.displayName || currentUser.email.split('@')[0],
-        ownerEmail: currentUser.email,
-        availability: {
-            startDate: null,
-            endDate: null
-        },
-        views: 0,
-        createdAt: serverTimestamp()
-    }));
+    // Load seed data from seed-data.js
+    const fakeItems = seedItems;
+
+    return fakeItems.map(item => {
+        // Process availability based on type
+        let availability;
+        if (item.availability.type === 'dateRange') {
+            availability = {
+                type: 'dateRange',
+                startDate: item.availability.startDateOffset !== null
+                    ? Timestamp.fromDate(getDaysFromNow(item.availability.startDateOffset))
+                    : null,
+                endDate: item.availability.endDateOffset !== null
+                    ? Timestamp.fromDate(getDaysFromNow(item.availability.endDateOffset))
+                    : null
+            };
+        } else {
+            availability = item.availability;
+        }
+
+        return {
+            name: item.name,
+            category: item.category,
+            description: item.description,
+            price: item.price,
+            emoji: itemEmojis[item.category],
+            ownerId: currentUser.uid,
+            ownerName: currentUser.displayName || currentUser.email.split('@')[0],
+            ownerEmail: currentUser.email,
+            availability: availability,
+            handoverTime: item.handoverTime,
+            views: 0,
+            createdAt: serverTimestamp()
+        };
+    });
 }
 
 // Open test listings modal
@@ -1475,9 +1652,9 @@ async function submitBookingRequest(event) {
     const startDate = new Date(startDateStr);
     const endDate = new Date(endDateStr);
 
-    // Validate dates
-    if (endDate <= startDate) {
-        alert('End date must be after start date');
+    // Validate dates - allow same-day booking
+    if (endDate < startDate) {
+        alert('End date cannot be before start date');
         return;
     }
 
@@ -1493,21 +1670,47 @@ async function submitBookingRequest(event) {
 
     // Validate against item availability if set
     if (item.availability) {
-        if (item.availability.startDate) {
-            const itemStartDate = item.availability.startDate.toDate();
-            if (startDate < itemStartDate) {
-                alert(`Item is only available from ${itemStartDate.toLocaleDateString()}`);
-                return;
-            }
-        }
+        const availability = item.availability;
 
-        if (item.availability.endDate) {
-            const itemEndDate = item.availability.endDate.toDate();
-            if (endDate > itemEndDate) {
-                alert(`Item is only available until ${itemEndDate.toLocaleDateString()}`);
+        if (availability.type === 'dateRange') {
+            if (availability.startDate) {
+                const itemStartDate = availability.startDate.toDate();
+                if (startDate < itemStartDate) {
+                    alert(`Item is only available from ${itemStartDate.toLocaleDateString()}`);
+                    return;
+                }
+            }
+
+            if (availability.endDate) {
+                const itemEndDate = availability.endDate.toDate();
+                if (endDate > itemEndDate) {
+                    alert(`Item is only available until ${itemEndDate.toLocaleDateString()}`);
+                    return;
+                }
+            }
+        } else if (availability.type === 'recurring') {
+            // Recurring type only allows same-day borrowing
+            const availableDays = availability.daysOfWeek || [];
+
+            // Check if it's same-day booking
+            if (startDate.toDateString() !== endDate.toDateString()) {
+                const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                const availableDayNames = availableDays.map(d => dayNames[d]).join(', ');
+                alert(`This item only allows same-day borrowing on: ${availableDayNames}. Please select the same date for pickup and return.`);
+                return;
+            }
+
+            // Check if the selected day is in the available days
+            const dayOfWeek = startDate.getDay();
+            if (!availableDays.includes(dayOfWeek)) {
+                const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                const selectedDay = dayNames[dayOfWeek];
+                const availableDayNames = availableDays.map(d => dayNames[d]).join(', ');
+                alert(`This item is only available on: ${availableDayNames}. You selected: ${selectedDay}`);
                 return;
             }
         }
+        // For 'always' type, no validation needed
     }
 
     try {
@@ -1578,6 +1781,90 @@ async function submitBookingRequest(event) {
 }
 
 // Create listing
+// Toggle availability fields based on type
+window.toggleAvailabilityFields = function() {
+    const type = document.getElementById('availabilityType').value;
+    document.getElementById('dateRangeFields').style.display = type === 'dateRange' ? 'block' : 'none';
+    document.getElementById('recurringFields').style.display = type === 'recurring' ? 'block' : 'none';
+};
+
+window.toggleEditAvailabilityFields = function() {
+    const type = document.getElementById('editAvailabilityType').value;
+    document.getElementById('editDateRangeFields').style.display = type === 'dateRange' ? 'block' : 'none';
+    document.getElementById('editRecurringFields').style.display = type === 'recurring' ? 'block' : 'none';
+};
+
+// Collect availability data from form
+function collectAvailabilityData(prefix = '') {
+    const typeId = prefix ? 'editAvailabilityType' : 'availabilityType';
+    const type = document.getElementById(typeId).value;
+
+    if (type === 'always') {
+        return { type: 'always' };
+    } else if (type === 'dateRange') {
+        const fromId = prefix ? 'editAvailableFrom' : 'availableFrom';
+        const untilId = prefix ? 'editAvailableUntil' : 'availableUntil';
+        const availableFromStr = document.getElementById(fromId).value;
+        const availableUntilStr = document.getElementById(untilId).value;
+
+        const availability = {
+            type: 'dateRange',
+            startDate: availableFromStr ? Timestamp.fromDate(new Date(availableFromStr)) : null,
+            endDate: availableUntilStr ? Timestamp.fromDate(new Date(availableUntilStr)) : null
+        };
+
+        // Validate dates
+        if (availability.startDate && availability.endDate) {
+            if (availability.endDate.toDate() <= availability.startDate.toDate()) {
+                throw new Error('Available Until date must be after Available From date');
+            }
+        }
+
+        return availability;
+    } else if (type === 'recurring') {
+        const days = [];
+        const dayPrefix = prefix ? 'edit-day-' : 'day-';
+        ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].forEach(day => {
+            const checkbox = document.getElementById(dayPrefix + day);
+            if (checkbox && checkbox.checked) {
+                days.push(parseInt(checkbox.value));
+            }
+        });
+
+        if (days.length === 0) {
+            throw new Error('Please select at least one day of the week');
+        }
+
+        return {
+            type: 'recurring',
+            daysOfWeek: days
+        };
+    }
+}
+
+// Collect handover time data from form (separate from availability)
+function collectHandoverTime(prefix = '') {
+    const timeStartId = prefix ? 'editHandoverTimeStart' : 'handoverTimeStart';
+    const timeEndId = prefix ? 'editHandoverTimeEnd' : 'handoverTimeEnd';
+    const timeStart = document.getElementById(timeStartId).value;
+    const timeEnd = document.getElementById(timeEndId).value;
+
+    // Validate time range if both provided
+    if (timeStart && timeEnd && timeStart >= timeEnd) {
+        throw new Error('Handover end time must be after start time');
+    }
+
+    // Return null if no time specified (flexible all day)
+    if (!timeStart && !timeEnd) {
+        return null;
+    }
+
+    return {
+        start: timeStart || null,
+        end: timeEnd || null
+    };
+}
+
 async function createListing(event) {
     event.preventDefault();
 
@@ -1585,24 +1872,11 @@ async function createListing(event) {
     const category = document.getElementById('itemCategory').value;
     const description = document.getElementById('itemDescription').value;
     const price = parseFloat(document.getElementById('itemPrice').value);
-    const availableFromStr = document.getElementById('availableFrom').value;
-    const availableUntilStr = document.getElementById('availableUntil').value;
-
-    // Build availability object
-    const availability = {
-        startDate: availableFromStr ? Timestamp.fromDate(new Date(availableFromStr)) : null,
-        endDate: availableUntilStr ? Timestamp.fromDate(new Date(availableUntilStr)) : null
-    };
-
-    // Validate availability dates if both are provided
-    if (availability.startDate && availability.endDate) {
-        if (availability.endDate.toDate() <= availability.startDate.toDate()) {
-            alert('Available Until date must be after Available From date');
-            return;
-        }
-    }
 
     try {
+        const availability = collectAvailabilityData();
+        const handoverTime = collectHandoverTime();
+
         await addDoc(collection(db, 'items'), {
             name,
             category,
@@ -1613,6 +1887,7 @@ async function createListing(event) {
             ownerName: currentUser.displayName || currentUser.email.split('@')[0],
             ownerEmail: currentUser.email,
             availability,
+            handoverTime,
             views: 0,
             createdAt: serverTimestamp()
         });
@@ -1626,7 +1901,106 @@ async function createListing(event) {
         showView('homeView');
     } catch (error) {
         console.error('Error creating listing:', error);
-        alert('Failed to create listing. Please try again.');
+        alert(error.message || 'Failed to create listing. Please try again.');
+    }
+}
+
+// Edit item
+window.editItem = async function(itemId) {
+    try {
+        const itemDoc = await getDoc(doc(db, 'items', itemId));
+        if (!itemDoc.exists()) {
+            alert('Item not found');
+            return;
+        }
+
+        const item = { id: itemDoc.id, ...itemDoc.data() };
+
+        // Populate form
+        document.getElementById('editItemId').value = item.id;
+        document.getElementById('editItemName').value = item.name;
+        document.getElementById('editItemCategory').value = item.category;
+        document.getElementById('editItemDescription').value = item.description;
+        document.getElementById('editItemPrice').value = item.price;
+
+        // Set availability fields
+        const availability = item.availability || { type: 'always' };
+        document.getElementById('editAvailabilityType').value = availability.type || 'always';
+
+        if (availability.type === 'dateRange') {
+            if (availability.startDate) {
+                document.getElementById('editAvailableFrom').value = availability.startDate.toDate().toISOString().split('T')[0];
+            }
+            if (availability.endDate) {
+                document.getElementById('editAvailableUntil').value = availability.endDate.toDate().toISOString().split('T')[0];
+            }
+        } else if (availability.type === 'recurring') {
+            // Check the appropriate days
+            if (availability.daysOfWeek) {
+                availability.daysOfWeek.forEach(day => {
+                    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+                    const checkbox = document.getElementById('edit-day-' + dayNames[day]);
+                    if (checkbox) checkbox.checked = true;
+                });
+            }
+        }
+
+        // Set handover time fields (separate from availability)
+        const handoverTime = item.handoverTime || {};
+        if (handoverTime.start) {
+            document.getElementById('editHandoverTimeStart').value = handoverTime.start;
+        }
+        if (handoverTime.end) {
+            document.getElementById('editHandoverTimeEnd').value = handoverTime.end;
+        }
+
+        // Handle legacy data: if timeStart/timeEnd exist in availability, migrate to handoverTime
+        if (availability.timeStart && !handoverTime.start) {
+            document.getElementById('editHandoverTimeStart').value = availability.timeStart;
+        }
+        if (availability.timeEnd && !handoverTime.end) {
+            document.getElementById('editHandoverTimeEnd').value = availability.timeEnd;
+        }
+
+        toggleEditAvailabilityFields();
+        showView('editItemView');
+    } catch (error) {
+        console.error('Error loading item for edit:', error);
+        alert('Error loading item details');
+    }
+};
+
+// Update item
+async function updateListing(event) {
+    event.preventDefault();
+
+    const itemId = document.getElementById('editItemId').value;
+    const name = document.getElementById('editItemName').value;
+    const category = document.getElementById('editItemCategory').value;
+    const description = document.getElementById('editItemDescription').value;
+    const price = parseFloat(document.getElementById('editItemPrice').value);
+
+    try {
+        const availability = collectAvailabilityData('edit');
+        const handoverTime = collectHandoverTime('edit');
+
+        await updateDoc(doc(db, 'items', itemId), {
+            name,
+            category,
+            description,
+            price,
+            emoji: itemEmojis[category],
+            availability,
+            handoverTime,
+            updatedAt: serverTimestamp()
+        });
+
+        alert('✅ Listing updated successfully!');
+        showView('homeView');
+        await loadItems();
+    } catch (error) {
+        console.error('Error updating listing:', error);
+        alert(error.message || 'Failed to update listing. Please try again.');
     }
 }
 
@@ -1658,7 +2032,7 @@ async function loadMyItems() {
         }
 
         grid.innerHTML = myItems.map(item => `
-            <div class="item-card">
+            <div class="item-card" onclick="editItem('${item.id}')" style="cursor: pointer;">
                 <div class="item-emoji">${item.emoji || '📦'}</div>
                 <h3>${item.name}</h3>
                 <span class="item-category">${item.category}</span>
@@ -3310,6 +3684,10 @@ function setupEventListeners() {
 
     // Create listing form
     document.getElementById('createListingForm').addEventListener('submit', createListing);
+
+    // Edit listing form
+    document.getElementById('editListingForm').addEventListener('submit', updateListing);
+    document.getElementById('backFromEditBtn').addEventListener('click', () => showView('homeView'));
 
     // Booking modal
     document.getElementById('bookingForm').addEventListener('submit', submitBookingRequest);

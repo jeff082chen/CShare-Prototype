@@ -109,16 +109,17 @@ service cloud.firestore {
     }
 
     match /analytics/{docId} {
-      allow read: if isEduUser();
-      allow create: if isEduUser();
+      allow read, create: if isEduUser();
+      allow delete: if isEduUser();  // Allow any .edu user to delete analytics
     }
 
     match /sessions/{sessionId} {
-      allow read: if isEduUser();
-      allow create, update: if isEduUser();
-      
+      allow read, create, update: if isEduUser();
+      allow delete: if isEduUser();  // Allow any .edu user to delete sessions
+
       match /events/{eventId} {
         allow read, create: if isEduUser();
+        allow delete: if isEduUser();  // Allow any .edu user to delete session events
       }
     }
   }

@@ -12,7 +12,6 @@
       "FIREBASE_SETUP.md",
       "test.html",
       "test.js",
-      "seed-data.js",
       ".env.example",
       "env.js.example"
     ],

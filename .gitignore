@@ -4,6 +4,9 @@ env.js
 
 # Firebase config (keep the example files)
 # firebase-config.js is deprecated, use env.js instead
+.firebase/
+*-debug.log
+.firebase*
 
 # Dependencies
 node_modules/

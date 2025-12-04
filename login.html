@@ -276,6 +276,9 @@
         </div>
     </div>
 
+    <!-- Load environment configuration before script -->
+    <script src="env.js"></script>
+
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
         import {
@@ -291,16 +294,7 @@
             setDoc,
             serverTimestamp
         } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-
-        // Firebase configuration - REPLACE WITH YOUR CONFIG
-        const firebaseConfig = {
-            apiKey: "AIzaSyAcbJCua9vbqd3IdMpqy0flCyU8X4uFy44",
-            authDomain: "cshare-cornell.firebaseapp.com",
-            projectId: "cshare-cornell",
-            storageBucket: "cshare-cornell.firebasestorage.app",
-            messagingSenderId: "314001056592",
-            appId: "1:314001056592:web:98705bdfe613e4cf0d8255"
-        };
+        import { firebaseConfig } from './env-config.js';
 
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);

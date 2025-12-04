@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seed Database - CShare</title>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f8faf9;
+        }
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2d5a3d;
+            margin-bottom: 20px;
+        }
+        button {
+            background: #2d5a3d;
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin: 10px 5px;
+        }
+        button:hover {
+            background: #1e3d2a;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            display: none;
+        }
+        .status.success {
+            background: #d1fae5;
+            color: #065f46;
+            display: block;
+        }
+        .status.error {
+            background: #fee2e2;
+            color: #991b1b;
+            display: block;
+        }
+        .status.info {
+            background: #dbeafe;
+            color: #1e40af;
+            display: block;
+        }
+        .progress {
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>CShare Database Seeder</h1>
+        <p>This tool will add 10 sample items to your Firestore database.</p>
+
+        <button id="seedBtn" onclick="seedDatabase()">Add Sample Items</button>
+        <button id="clearBtn" onclick="clearDatabase()">Clear All Items</button>
+
+        <div id="status" class="status"></div>
+        <div id="progress" class="progress"></div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+        import {
+            getFirestore,
+            collection,
+            addDoc,
+            getDocs,
+            deleteDoc,
+            doc,
+            serverTimestamp
+        } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+
+        // Firebase configuration - REPLACE WITH YOUR CONFIG
+        const firebaseConfig = {
+            apiKey: "YOUR-API-KEY",
+            authDomain: "YOUR-PROJECT.firebaseapp.com",
+            projectId: "YOUR-PROJECT-ID",
+            storageBucket: "YOUR-PROJECT.appspot.com",
+            messagingSenderId: "SENDER-ID",
+            appId: "APP-ID"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        const seedItems = [
+            {
+                name: "KitchenAid Stand Mixer",
+                category: "Kitchen",
+                description: "Professional 5-quart stand mixer with multiple attachments. Perfect for baking bread, cookies, and cakes. Includes dough hook, flat beater, and wire whip.",
+                price: 8.00,
+                emoji: "🍳",
+                ownerId: "TEST_OWNER_ID",
+                ownerName: "Demo User",
+                ownerEmail: "demo@cornell.edu",
+                availability: {
+                    startDate: null,
+                    endDate: null
+                },
+                views: 0
+            },
+            {
+                name: "Dyson V11 Vacuum Cleaner",
+                category: "Appliances",
+                description: "Cordless stick vacuum with powerful suction and HEPA filtration. Great for apartments and quick cleanups. Comes with multiple attachments for different surfaces.",
+                price: 10.00,
+                emoji: "🧹",
+                ownerId: "TEST_OWNER_ID",
+                ownerName: "Demo User",
+                ownerEmail: "demo@cornell.edu",
+                availability: {
+                    startDate: null,
+                    endDate: null
+                },
+                views: 0
+            },
+            {
+                name: "IKEA POÄNG Armchair",
+                category: "Furniture",
+                description: "Comfortable bentwood armchair with cushion. Perfect for reading or studying. Modern Scandinavian design that fits any room.",
+                price: 5.00,
+                emoji: "🪑",
+                ownerId: "TEST_OWNER_ID",
+                ownerName: "Demo User",
+                ownerEmail: "demo@cornell.edu",
+                availability: {
+                    startDate: null,
+                    endDate: null
+                },
+                views: 0
+            },
+            {
+                name: "Canon EOS Rebel T7 DSLR Camera",
+                category: "Electronics",
+                description: "24.1MP digital camera with WiFi connectivity and video recording. Includes 18-55mm lens, battery, charger, and memory card. Great for photography projects.",
+                price: 15.00,
+                emoji: "🖥️",
+                ownerId: "TEST_OWNER_ID",
+                ownerName: "Demo User",
+                ownerEmail: "demo@cornell.edu",
+                availability: {
+                    startDate: null,
+                    endDate: null
+                },
+                views: 0
+            },
+            {
+                name: "Instant Pot Duo 7-in-1",
+                category: "Kitchen",
+                description: "Multi-functional pressure cooker that can pressure cook, slow cook, rice cooker, steamer, sauté pan, yogurt maker, and warmer. 6-quart capacity.",
+                price: 7.00,
+                emoji: "🍳",
+                ownerId: "TEST_OWNER_ID",
+                ownerName: "Demo User",
+                ownerEmail: "demo@cornell.edu",
+                availability: {
+                    startDate: null,
+                    endDate: null
+                },
+                views: 0
+            },
+            {
+                name: "Nintendo Switch Console",
+                category: "Electronics",
+                description: "Gaming console with two Joy-Con controllers and dock. Perfect for game nights with friends. Includes Mario Kart 8 Deluxe and Super Smash Bros Ultimate.",
+                price: 12.00,
+                emoji: "🖥️",
+                ownerId: "TEST_OWNER_ID",
+                ownerName: "Demo User",
+                ownerEmail: "demo@cornell.edu",
+                availability: {
+                    startDate: null,
+                    endDate: null
+                },
+                views: 0
+            },
+            {
+                name: "Portable Air Conditioner",
+                category: "Appliances",
+                description: "10,000 BTU portable AC unit with remote control. Perfect for summer months in dorm rooms or apartments. Includes window kit for easy installation.",
+                price: 15.00,
+                emoji: "🧹",
+                ownerId: "TEST_OWNER_ID",
+                ownerName: "Demo User",
+                ownerEmail: "demo@cornell.edu",
+                availability: {
+                    startDate: null,
+                    endDate: null
+                },
+                views: 0
+            },
+            {
+                name: "Folding Camping Table",
+                category: "Other",
+                description: "Lightweight aluminum camping table that folds for easy storage and transport. Great for outdoor events, tailgating, or extra workspace.",
+                price: 0,
+                emoji: "📦",
+                ownerId: "TEST_OWNER_ID",
+                ownerName: "Demo User",
+                ownerEmail: "demo@cornell.edu",
+                availability: {
+                    startDate: null,
+                    endDate: null
+                },
+                views: 0
+            },
+            {
+                name: "Ninja Professional Blender",
+                category: "Kitchen",
+                description: "1000-watt blender perfect for smoothies, frozen drinks, and food prep. 72oz pitcher with easy-pour spout. BPA-free and dishwasher safe.",
+                price: 5.00,
+                emoji: "🍳",
+                ownerId: "TEST_OWNER_ID",
+                ownerName: "Demo User",
+                ownerEmail: "demo@cornell.edu",
+                availability: {
+                    startDate: null,
+                    endDate: null
+                },
+                views: 0
+            },
+            {
+                name: "Adjustable Standing Desk",
+                category: "Furniture",
+                description: "Electric height-adjustable desk with memory presets. 48x30 inch surface perfect for dual monitor setup. Promotes better posture and productivity.",
+                price: 10.00,
+                emoji: "🪑",
+                ownerId: "TEST_OWNER_ID",
+                ownerName: "Demo User",
+                ownerEmail: "demo@cornell.edu",
+                availability: {
+                    startDate: null,
+                    endDate: null
+                },
+                views: 0
+            }
+        ];
+
+        window.seedDatabase = async function() {
+            const statusDiv = document.getElementById('status');
+            const progressDiv = document.getElementById('progress');
+            const seedBtn = document.getElementById('seedBtn');
+
+            seedBtn.disabled = true;
+            statusDiv.className = 'status info';
+            statusDiv.textContent = 'Adding items to database...';
+            progressDiv.innerHTML = '';
+
+            try {
+                let count = 0;
+                for (const item of seedItems) {
+                    await addDoc(collection(db, 'items'), {
+                        ...item,
+                        createdAt: serverTimestamp()
+                    });
+                    count++;
+                    progressDiv.innerHTML = `Added ${count} of ${seedItems.length} items...`;
+                }
+
+                statusDiv.className = 'status success';
+                statusDiv.textContent = `✅ Successfully added ${seedItems.length} items to the database!`;
+                progressDiv.innerHTML = 'You can now close this page and refresh your main app.';
+            } catch (error) {
+                console.error('Error seeding database:', error);
+                statusDiv.className = 'status error';
+                statusDiv.textContent = `❌ Error: ${error.message}`;
+                progressDiv.innerHTML = 'Please check your Firebase configuration and try again.';
+            } finally {
+                seedBtn.disabled = false;
+            }
+        };
+
+        window.clearDatabase = async function() {
+            if (!confirm('Are you sure you want to delete ALL items from the database? This cannot be undone!')) {
+                return;
+            }
+
+            const statusDiv = document.getElementById('status');
+            const progressDiv = document.getElementById('progress');
+            const clearBtn = document.getElementById('clearBtn');
+
+            clearBtn.disabled = true;
+            statusDiv.className = 'status info';
+            statusDiv.textContent = 'Deleting items from database...';
+            progressDiv.innerHTML = '';
+
+            try {
+                const itemsSnapshot = await getDocs(collection(db, 'items'));
+                let count = 0;
+
+                for (const itemDoc of itemsSnapshot.docs) {
+                    await deleteDoc(doc(db, 'items', itemDoc.id));
+                    count++;
+                    progressDiv.innerHTML = `Deleted ${count} of ${itemsSnapshot.size} items...`;
+                }
+
+                statusDiv.className = 'status success';
+                statusDiv.textContent = `✅ Successfully deleted ${count} items from the database!`;
+                progressDiv.innerHTML = '';
+            } catch (error) {
+                console.error('Error clearing database:', error);
+                statusDiv.className = 'status error';
+                statusDiv.textContent = `❌ Error: ${error.message}`;
+                progressDiv.innerHTML = 'Please check your permissions and try again.';
+            } finally {
+                clearBtn.disabled = false;
+            }
+        };
+    </script>
+</body>
+</html>

@@ -13,22 +13,22 @@ import {
     doc,
     getDoc,
     setDoc,
+    updateDoc,
+    deleteDoc,
+    deleteField,
     query,
     orderBy,
     where,
+    limit,
     onSnapshot,
-    serverTimestamp
+    serverTimestamp,
+    Timestamp,
+    writeBatch,
+    arrayUnion
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 
-// Firebase configuration - REPLACE WITH YOUR CONFIG
-const firebaseConfig = {
-    apiKey: "YOUR-API-KEY",
-    authDomain: "YOUR-PROJECT.firebaseapp.com",
-    projectId: "YOUR-PROJECT-ID",
-    storageBucket: "YOUR-PROJECT.appspot.com",
-    messagingSenderId: "SENDER-ID",
-    appId: "APP-ID"
-};
+// Import Firebase configuration from environment
+import { firebaseConfig } from './env-config.js';
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -39,6 +39,12 @@ let currentUser = null;
 let currentChatId = null;
 let currentItemId = null;
 let unsubscribeMessages = null;
+let unsubscribeTypingIndicator = null;
+let typingTimeout = null;
+let userPreferences = null;
+let lastRankingContext = { query: '', desiredStart: null, desiredEnd: null };
+let rankingIndex = {};
+let isNearBottom = true;
 
 // Category emojis
 const itemEmojis = {
@@ -53,7 +59,9 @@ const itemEmojis = {
 onAuthStateChanged(auth, (user) => {
     if (user && user.email.endsWith('.edu')) {
         currentUser = user;
-        initializeApp();
+        initApp();
+        // Initialize session recording
+        initSessionRecording();
     } else {
         // Redirect to login if not authenticated
         window.location.href = '/login.html';
@@ -61,10 +69,12 @@ onAuthStateChanged(auth, (user) => {
 });
 
 // Initialize the app
-async function initializeApp() {
+async function initApp() {
     updateCurrentUserDisplay();
+    await loadUserPreferences();
     await loadItems();
     setupEventListeners();
+    setupSessionRecording();
 }
 
 // Update user display
@@ -84,6 +94,274 @@ function formatTime(timestamp) {
     return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 }
 
+/**
+ * Convert a numeric weight value (0-5) to a human-readable descriptor
+ * Used in the preferences UI to show the current importance level
+ * @param {number} value - Weight value from 0 (off) to 5 (very high)
+ * @returns {string} Human-readable descriptor
+ */
+function weightDescriptor(value) {
+    if (value >= 5) return 'Very high';
+    if (value === 4) return 'High';
+    if (value === 3) return 'Medium';
+    if (value === 2) return 'Low';
+    if (value === 1) return 'Very low';
+    return 'Off';
+}
+
+/**
+ * Update the live preview in the preferences modal showing current weight settings
+ * Provides real-time feedback as user adjusts sliders (0-5 scale)
+ * Also updates the numeric value displays next to each slider
+ */
+function updatePreferencesPreview() {
+    const price = parseInt(document.getElementById('weightPrice')?.value || '3', 10);
+    const category = parseInt(document.getElementById('weightCategory')?.value || '3', 10);
+    const availability = parseInt(document.getElementById('weightAvailability')?.value || '3', 10);
+    const urgency = parseInt(document.getElementById('weightUrgency')?.value || '3', 10);
+
+    const preview = document.getElementById('preferencesPreviewText');
+    if (preview) {
+        const parts = [
+            `💰 Price: ${weightDescriptor(price)}`,
+            `📁 Category: ${weightDescriptor(category)}`,
+            `📅 Availability: ${weightDescriptor(availability)}`,
+            `⚡ Urgency: ${weightDescriptor(urgency)}`
+        ];
+        preview.textContent = parts.join(' | ');
+
+        // Add contextual hint based on settings
+        const total = price + category + availability + urgency;
+        let hint = '';
+        if (total === 0) {
+            hint = ' (All factors disabled - items will be ranked by recency and popularity only)';
+        } else if (price === 5 && category === 0 && availability === 0 && urgency === 0) {
+            hint = ' (Focus: Finding the cheapest items)';
+        } else if (category === 5 && price === 0 && availability === 0 && urgency === 0) {
+            hint = ' (Focus: Matching your preferred categories)';
+        } else if (urgency === 5 && price <= 2 && category <= 2 && availability <= 2) {
+            hint = ' (Focus: Items available ASAP)';
+        } else if (Math.max(price, category, availability, urgency) - Math.min(price, category, availability, urgency) <= 1) {
+            hint = ' (Balanced approach across all factors)';
+        }
+        preview.textContent += hint;
+    }
+
+    const labelMap = {
+        weightPrice: price,
+        weightCategory: category,
+        weightAvailability: availability,
+        weightUrgency: urgency
+    };
+    Object.entries(labelMap).forEach(([id, val]) => {
+        const label = document.getElementById(`${id}Value`);
+        if (label) label.textContent = val;
+    });
+}
+function buildLockIds(itemId, startDate, endDate) {
+    const ids = [];
+    const cursor = new Date(startDate);
+    cursor.setHours(0, 0, 0, 0);
+    const end = new Date(endDate);
+    end.setHours(0, 0, 0, 0);
+    while (cursor <= end) {
+        ids.push(`${itemId}_${cursor.toISOString().split('T')[0]}`);
+        cursor.setDate(cursor.getDate() + 1);
+    }
+    return ids;
+}
+
+async function loadUserPreferences() {
+    if (!currentUser) return;
+
+    try {
+        const prefDocRef = doc(db, 'users', currentUser.uid, 'preferences', 'default');
+        const prefDoc = await getDoc(prefDocRef);
+
+        if (prefDoc.exists()) {
+            const data = prefDoc.data();
+            userPreferences = {
+                categories: data.categories || [],
+                maxPrice: typeof data.maxPrice === 'number' ? data.maxPrice : null,
+                dateFrom: data.dateFrom ? data.dateFrom.toDate() : null,
+                dateTo: data.dateTo ? data.dateTo.toDate() : null,
+                weights: {
+                    price: typeof data.weights?.price === 'number' ? data.weights.price : 3,
+                    category: typeof data.weights?.category === 'number' ? data.weights.category : 3,
+                    availability: typeof data.weights?.availability === 'number' ? data.weights.availability : 3,
+                    urgency: typeof data.weights?.urgency === 'number' ? data.weights.urgency : 3
+                }
+            };
+        } else {
+            userPreferences = {
+                categories: [],
+                maxPrice: null,
+                dateFrom: null,
+                dateTo: null,
+                weights: {
+                    price: 3,
+                    category: 3,
+                    availability: 3,
+                    urgency: 3
+                }
+            };
+        }
+    } catch (error) {
+        console.error('Error loading preferences:', error);
+        userPreferences = {
+            categories: [],
+            maxPrice: null,
+            dateFrom: null,
+            dateTo: null,
+            weights: {
+                price: 3,
+                category: 3,
+                availability: 3,
+                urgency: 3
+            }
+        };
+    }
+}
+
+// Analytics logging helper
+async function logAnalytics(action, itemId = null, additionalData = {}) {
+    if (!currentUser) return;
+
+    try {
+        await addDoc(collection(db, 'analytics'), {
+            userId: currentUser.uid,
+            userEmail: currentUser.email,
+            itemId: itemId,
+            action: action,
+            timestamp: serverTimestamp(),
+            ...additionalData
+        });
+    } catch (error) {
+        console.error('Error logging analytics:', error);
+        // Non-critical error, don't interrupt user flow
+    }
+}
+
+// Automated testing helpers
+const automatedTestState = { running: false, scenarioId: null };
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function setAutoTestStatus(text) {
+    const el = document.getElementById('autoTestStatus');
+    if (el) el.textContent = text;
+}
+
+function appendAutoTestLog(message) {
+    const logContainer = document.getElementById('autoTestLog');
+    if (!logContainer) return;
+    const entry = document.createElement('div');
+    entry.textContent = `${new Date().toLocaleTimeString()}: ${message}`;
+    logContainer.appendChild(entry);
+    logContainer.scrollTop = logContainer.scrollHeight;
+}
+
+async function pickTestItem(preferredCategory = null) {
+    const rankedItems = Object.values(rankingIndex);
+    const ordered = preferredCategory
+        ? rankedItems.filter(i => i.category === preferredCategory).concat(rankedItems)
+        : rankedItems;
+
+    const candidate = ordered.find(i => i.ownerId !== currentUser?.uid) || ordered[0];
+    if (candidate) return candidate;
+
+    const snapshot = await getDocs(collection(db, 'items'));
+    let fallback = null;
+    snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        const item = { id: docSnap.id, ...data };
+        if (!fallback || (currentUser && item.ownerId !== currentUser.uid)) {
+            fallback = item;
+        }
+    });
+    return fallback;
+}
+
+async function runAutomatedUserTest() {
+    if (automatedTestState.running) {
+        appendAutoTestLog('Test already running.');
+        return;
+    }
+    if (!currentUser) {
+        alert('Please sign in to run automated tests.');
+        return;
+    }
+
+    automatedTestState.running = true;
+    automatedTestState.scenarioId = `auto-${Date.now()}`;
+    setAutoTestStatus('Running');
+    appendAutoTestLog('Starting automated user test.');
+
+    try {
+        const searchTerm = (userPreferences?.categories?.[0]) || Object.keys(itemEmojis)[0] || 'Electronics';
+        document.getElementById('searchInput').value = searchTerm;
+        await logAnalytics('auto_test_step', null, { scenarioId: automatedTestState.scenarioId, step: 'search', searchTerm });
+        await searchItems();
+        appendAutoTestLog(`Searched for "${searchTerm}".`);
+        await sleep(1000);
+
+        const testItem = await pickTestItem(userPreferences?.categories?.[0]);
+        if (!testItem) {
+            appendAutoTestLog('No items available to test.');
+            setAutoTestStatus('Idle');
+            automatedTestState.running = false;
+            return;
+        }
+
+        await logAnalytics('auto_test_step', testItem.id, { scenarioId: automatedTestState.scenarioId, step: 'view_item', itemName: testItem.name });
+        await showItemDetail(testItem.id);
+        appendAutoTestLog(`Opened item detail for ${testItem.name}.`);
+        await sleep(1000);
+
+        if (testItem.ownerId !== currentUser.uid) {
+            openBookingModal(testItem.id);
+            const startDate = new Date();
+            startDate.setDate(startDate.getDate() + 1);
+            const endDate = new Date();
+            endDate.setDate(endDate.getDate() + 3);
+            document.getElementById('bookingStartDate').value = startDate.toISOString().split('T')[0];
+            document.getElementById('bookingEndDate').value = endDate.toISOString().split('T')[0];
+            await logAnalytics('auto_test_step', testItem.id, {
+                scenarioId: automatedTestState.scenarioId,
+                step: 'booking_request',
+                startDate: startDate.toISOString(),
+                endDate: endDate.toISOString()
+            });
+            await submitBookingRequest({ preventDefault: () => {} });
+            appendAutoTestLog('Submitted booking request.');
+            await sleep(800);
+        } else {
+            appendAutoTestLog('Skipping booking (item owned by current user).');
+        }
+
+        await logAnalytics('auto_test_step', testItem.id, { scenarioId: automatedTestState.scenarioId, step: 'open_chat' });
+        await openChat(testItem.id);
+        await sleep(800);
+        const chatInput = document.getElementById('chatInput');
+        if (chatInput) {
+            chatInput.value = `Automated test ping (${automatedTestState.scenarioId})`;
+            await logAnalytics('auto_test_step', testItem.id, { scenarioId: automatedTestState.scenarioId, step: 'send_chat', messageLength: chatInput.value.length });
+            await sendMessage();
+            appendAutoTestLog('Sent chat message.');
+        }
+
+        await logAnalytics('auto_test_complete', testItem.id, { scenarioId: automatedTestState.scenarioId });
+        appendAutoTestLog('Automated test complete.');
+        setAutoTestStatus('Completed');
+    } catch (error) {
+        console.error('Automated test failed:', error);
+        appendAutoTestLog(`Error: ${error.message}`);
+        setAutoTestStatus('Failed');
+    } finally {
+        automatedTestState.running = false;
+        setTimeout(() => setAutoTestStatus('Idle'), 1500);
+    }
+}
+
 function getChatId(itemId, userId) {
     const item = window.currentItemData;
     if (!item) return null;
@@ -93,12 +371,332 @@ function getChatId(itemId, userId) {
     return `${itemId}_${users[0]}_${users[1]}`;
 }
 
+/**
+ * Update the last read timestamp for the current user in a chat
+ * Used to track which messages are unread
+ */
+async function updateLastRead(chatId) {
+    if (!currentUser || !chatId) return;
+
+    try {
+        const chatRef = doc(db, 'chats', chatId);
+        const lastReadField = `lastRead.${currentUser.uid}`;
+        await setDoc(chatRef, {
+            [lastReadField]: serverTimestamp()
+        }, { merge: true });
+    } catch (error) {
+        console.error('Error updating last read:', error);
+    }
+}
+
+/**
+ * Get the count of unread messages in a chat for the current user
+ * @param {string} chatId - The chat ID to check
+ * @returns {Promise<number>} Number of unread messages
+ */
+async function getUnreadCount(chatId) {
+    if (!currentUser || !chatId) return 0;
+
+    try {
+        // Get chat metadata to find lastRead timestamp
+        const chatDoc = await getDoc(doc(db, 'chats', chatId));
+        const lastReadTimestamp = chatDoc.exists()
+            ? chatDoc.data()?.lastRead?.[currentUser.uid]
+            : null;
+
+        // Get all messages
+        const messagesRef = collection(db, 'chats', chatId, 'messages');
+        const messagesSnapshot = await getDocs(messagesRef);
+
+        let unreadCount = 0;
+        messagesSnapshot.forEach((msgDoc) => {
+            const msg = msgDoc.data();
+            // Count messages sent by others that are newer than lastRead
+            if (msg.senderId !== currentUser.uid) {
+                if (!lastReadTimestamp || (msg.createdAt && msg.createdAt > lastReadTimestamp)) {
+                    unreadCount++;
+                }
+            }
+        });
+
+        return unreadCount;
+    } catch (error) {
+        console.error('Error getting unread count:', error);
+        return 0;
+    }
+}
+
+/**
+ * Set typing indicator status for current user in a chat
+ * @param {string} chatId - The chat ID
+ * @param {boolean} isTyping - Whether user is currently typing
+ */
+async function setTypingIndicator(chatId, isTyping) {
+    if (!currentUser || !chatId) return;
+
+    try {
+        const chatRef = doc(db, 'chats', chatId);
+        const typingField = `typing.${currentUser.uid}`;
+
+        if (isTyping) {
+            await setDoc(chatRef, {
+                [typingField]: {
+                    name: currentUser.displayName || currentUser.email.split('@')[0],
+                    timestamp: serverTimestamp()
+                }
+            }, { merge: true });
+        } else {
+            await updateDoc(chatRef, {
+                [typingField]: deleteField()
+            });
+        }
+    } catch (error) {
+        console.error('Error setting typing indicator:', error);
+    }
+}
+
 // View Management
 function showView(viewId) {
     document.querySelectorAll('.view').forEach(view => {
         view.classList.remove('active');
     });
     document.getElementById(viewId).classList.add('active');
+
+    // Track view change in session recording
+    if (currentSessionId) {
+        trackViewChange(viewId);
+    }
+}
+
+/**
+ * Rank items based on multiple matching dimensions with user-configurable weights
+ *
+ * The ranking system uses a weighted composite score combining:
+ * - Search relevance (category/name/description match)
+ * - Category preference match (from user preferences)
+ * - Availability overlap (matching desired dates)
+ * - Urgency (how soon the user needs the item)
+ * - Popularity (view count)
+ * - Recency (newly listed items get a boost)
+ * - Price sensitivity (matching user's budget)
+ *
+ * User weights (0-5 scale) are converted to multipliers (0-1 scale) and applied
+ * to category, availability, urgency, and price scoring dimensions.
+ *
+ * @param {Array} items - Array of item objects to rank
+ * @param {string} searchQuery - User's search query
+ * @param {Date} desiredStart - Desired rental start date
+ * @param {Date} desiredEnd - Desired rental end date
+ * @returns {Array} Sorted array of items with scoring metadata
+ */
+function rankItems(items, searchQuery = '', desiredStart = null, desiredEnd = null) {
+    lastRankingContext = {
+        query: searchQuery || '',
+        desiredStart: desiredStart || null,
+        desiredEnd: desiredEnd || null
+    };
+
+    const scoringConfig = {
+        weights: {
+            searchMatch: 0.3,
+            categoryPreference: 0.2,
+            availabilityOverlap: 0.2,
+            urgency: 0.1,
+            popularity: 0.1,
+            newItemBoost: 0.1,
+            price: 0.1
+        },
+        recencyWindowDays: 30
+    };
+
+    const query = searchQuery.toLowerCase().trim();
+    const now = new Date();
+    const prefs = userPreferences || {};
+    const prefCategories = prefs.categories || [];
+    const targetStart = desiredStart || prefs.dateFrom || null;
+    const targetEnd = desiredEnd || prefs.dateTo || null;
+    const prefWeights = prefs.weights || { price: 3, category: 3, availability: 3, urgency: 3 };
+    const prefMaxPrice = typeof prefs.maxPrice === 'number' ? prefs.maxPrice : null;
+
+    const toDateSafe = (value) => {
+        if (!value) return null;
+        if (typeof value.toDate === 'function') return value.toDate();
+        return new Date(value);
+    };
+
+    const availabilityRange = (item) => {
+        const start = toDateSafe(item?.availability?.startDate) || new Date(0);
+        const end = toDateSafe(item?.availability?.endDate) || new Date(8640000000000000);
+        return { start, end };
+    };
+
+    const popularityValues = items.map((i) => i?.views || 0);
+    const maxPopularity = Math.max(...popularityValues, 0);
+
+    return items
+        .map((item) => {
+            const nameLower = (item.name || '').toLowerCase();
+            const descLower = (item.description || '').toLowerCase();
+            const catLower = (item.category || '').toLowerCase();
+
+            // Search query match
+            let searchScore = 0;
+            if (query) {
+                if (catLower === query) searchScore = 1;
+                else if (catLower.includes(query)) searchScore = 0.85;
+                else if (nameLower.includes(query)) searchScore = 0.7;
+                else if (descLower.includes(query)) searchScore = 0.4;
+            }
+
+            // Category preference match
+            const categoryPreferenceScore = prefCategories.includes(item.category) ? 1 : 0;
+
+            // Availability overlap
+            const { start, end } = availabilityRange(item);
+            let availabilityScore = 0.5;
+            if (targetStart || targetEnd) {
+                const desiredStartDate = targetStart ? toDateSafe(targetStart) : new Date(0);
+                const desiredEndDate = targetEnd ? toDateSafe(targetEnd) : new Date(8640000000000000);
+                const overlaps = desiredStartDate <= end && desiredEndDate >= start;
+                availabilityScore = overlaps ? 1 : 0;
+            }
+
+            // User urgency (soonest desired start gets higher score)
+            let urgencyScore = 0;
+            if (targetStart) {
+                const desiredDate = toDateSafe(targetStart);
+                const daysUntil = (desiredDate - now) / (1000 * 60 * 60 * 24);
+                if (daysUntil <= 1) urgencyScore = 1;
+                else if (daysUntil <= 7) urgencyScore = 0.9;
+                else if (daysUntil <= 30) urgencyScore = 0.6;
+                else if (daysUntil <= 90) urgencyScore = 0.3;
+                else urgencyScore = 0.1;
+            }
+
+            // Popularity
+            const popularityScore = maxPopularity > 0 ? Math.min((item.views || 0) / maxPopularity, 1) : 0;
+
+            // New item boost (recently created items)
+            let newItemScore = 0;
+            const createdAt = toDateSafe(item.createdAt);
+            if (createdAt) {
+                const ageDays = (now - createdAt) / (1000 * 60 * 60 * 24);
+                newItemScore = Math.max(0, 1 - ageDays / scoringConfig.recencyWindowDays);
+            }
+
+            // Price sensitivity score
+            let priceScore = 0.5;
+            if (prefMaxPrice !== null && typeof item.price === 'number') {
+                if (item.price <= prefMaxPrice) {
+                    priceScore = 1;
+                } else {
+                    priceScore = Math.max(0, 1 - ((item.price - prefMaxPrice) / Math.max(prefMaxPrice, 1)));
+                }
+            }
+
+            const weights = scoringConfig.weights;
+            const multipliers = {
+                price: (prefWeights.price ?? 3) / 5,
+                categoryPreference: (prefWeights.category ?? 3) / 5,
+                availabilityOverlap: (prefWeights.availability ?? 3) / 5,
+                urgency: (prefWeights.urgency ?? 3) / 5
+            };
+
+            const weighted = {
+                searchMatch: weights.searchMatch * searchScore,
+                categoryPreference: weights.categoryPreference * multipliers.categoryPreference * categoryPreferenceScore,
+                availabilityOverlap: weights.availabilityOverlap * multipliers.availabilityOverlap * availabilityScore,
+                urgency: weights.urgency * multipliers.urgency * urgencyScore,
+                popularity: weights.popularity * popularityScore,
+                newItemBoost: weights.newItemBoost * newItemScore,
+                price: weights.price * multipliers.price * priceScore
+            };
+
+            const totalWeight =
+                weights.searchMatch +
+                (weights.categoryPreference * multipliers.categoryPreference) +
+                (weights.availabilityOverlap * multipliers.availabilityOverlap) +
+                (weights.urgency * multipliers.urgency) +
+                weights.popularity +
+                weights.newItemBoost +
+                (weights.price * multipliers.price);
+
+            const compositeScore = Object.values(weighted).reduce((a, b) => a + b, 0) / (totalWeight || 1);
+
+            const breakdown = {
+                searchRelevance: Math.round(searchScore * 100),
+                categoryPreferenceMatch: Math.round(categoryPreferenceScore * 100),
+                availabilityMatch: Math.round(availabilityScore * 100),
+                urgencyBonus: Math.round(urgencyScore * 100),
+                popularityBonus: Math.round(popularityScore * 100),
+                newItemBonus: Math.round(newItemScore * 100),
+                priceSensitivity: Math.round(priceScore * 100)
+            };
+
+            return {
+                ...item,
+                _score: compositeScore,
+                matchScore: Math.round(compositeScore * 100),
+                breakdown
+            };
+        })
+        .sort((a, b) => {
+            if (b._score !== a._score) return b._score - a._score;
+            const aCreated = toDateSafe(a.createdAt) || new Date(0);
+            const bCreated = toDateSafe(b.createdAt) || new Date(0);
+            return bCreated - aCreated;
+        });
+}
+
+function getMatchMetrics(item) {
+    const defaultBreakdown = {
+        searchRelevance: 0,
+        categoryPreferenceMatch: 0,
+        availabilityMatch: 0,
+        urgencyBonus: 0,
+        popularityBonus: 0,
+        newItemBonus: 0,
+        priceSensitivity: 0
+    };
+
+    const rawScore = typeof item?.matchScore === 'number'
+        ? item.matchScore
+        : Math.round(((item?._score || 0) * 100));
+
+    const breakdown = { ...defaultBreakdown, ...(item?.breakdown || {}) };
+    const clamp = (value) => Math.max(0, Math.min(100, Math.round(value)));
+
+    return {
+        matchScore: clamp(rawScore),
+        breakdown: Object.fromEntries(
+            Object.entries(breakdown).map(([key, value]) => [key, clamp(value)])
+        )
+    };
+}
+
+function renderMatchBreakdown(item) {
+    const { matchScore, breakdown } = getMatchMetrics(item);
+
+    return `
+        <div class="match-section">
+            <div class="match-score">
+                <div class="match-score-number">${matchScore}</div>
+                <div class="match-score-label">Match score (0–100)</div>
+            </div>
+            <details class="match-breakdown" onclick="event.stopPropagation()">
+                <summary>Why this item matches?</summary>
+                <ul>
+                    <li><span>Search relevance</span><span>${breakdown.searchRelevance}/100</span></li>
+                    <li><span>Category preference match</span><span>${breakdown.categoryPreferenceMatch}/100</span></li>
+                    <li><span>Availability match</span><span>${breakdown.availabilityMatch}/100</span></li>
+                    <li><span>Urgency bonus</span><span>${breakdown.urgencyBonus}/100</span></li>
+                    <li><span>Popularity bonus</span><span>${breakdown.popularityBonus}/100</span></li>
+                    <li><span>New-item bonus</span><span>${breakdown.newItemBonus}/100</span></li>
+                    <li><span>Price sensitivity</span><span>${breakdown.priceSensitivity}/100</span></li>
+                </ul>
+            </details>
+        </div>
+    `;
 }
 
 // Load items from Firestore
@@ -111,7 +709,9 @@ async function loadItems() {
             itemsArray.push({ id: doc.id, ...doc.data() });
         });
 
-        renderItems(itemsArray);
+        // Rank items by popularity and availability
+        const rankedItems = rankItems(itemsArray, '');
+        renderItems(rankedItems);
     } catch (error) {
         console.error('Error loading items:', error);
         document.getElementById('itemsGrid').innerHTML = `
@@ -126,6 +726,12 @@ async function loadItems() {
 // Render items
 function renderItems(itemsToRender) {
     const grid = document.getElementById('itemsGrid');
+    rankingIndex = {};
+    itemsToRender.forEach(item => {
+        if (item?.id) {
+            rankingIndex[item.id] = item;
+        }
+    });
 
     if (itemsToRender.length === 0) {
         grid.innerHTML = `
@@ -137,16 +743,21 @@ function renderItems(itemsToRender) {
         return;
     }
 
-    grid.innerHTML = itemsToRender.map(item => `
-        <div class="item-card" onclick="showItemDetail('${item.id}')">
-            <div class="item-emoji">${item.emoji || '📦'}</div>
-            <h3>${item.name}</h3>
-            <span class="item-category">${item.category}</span>
-            <p>${item.description.substring(0, 80)}...</p>
-            <div class="item-price">${formatPrice(item.price)}</div>
-            <div class="item-owner">Listed by ${item.ownerName}</div>
-        </div>
-    `).join('');
+    grid.innerHTML = itemsToRender.map(item => {
+        const descriptionPreview = (item.description || '').substring(0, 80);
+        const matchSection = renderMatchBreakdown(item);
+        return `
+            <div class="item-card" onclick="showItemDetail('${item.id}')">
+                <div class="item-emoji">${item.emoji || '📦'}</div>
+                <h3>${item.name}</h3>
+                <span class="item-category">${item.category}</span>
+                <p>${descriptionPreview}...</p>
+                <div class="item-price">${formatPrice(item.price)}</div>
+                ${matchSection}
+                <div class="item-owner">Listed by ${item.ownerName}</div>
+            </div>
+        `;
+    }).join('');
 }
 
 // Show item detail
@@ -159,10 +770,56 @@ window.showItemDetail = async function (itemId) {
             return;
         }
 
-        const item = { id: itemDoc.id, ...itemDoc.data() };
+        const baseItem = { id: itemDoc.id, ...itemDoc.data() };
+        const rankedItem = rankingIndex[itemId]
+            ? { ...baseItem, ...rankingIndex[itemId] }
+            : rankItems([baseItem], lastRankingContext.query, lastRankingContext.desiredStart, lastRankingContext.desiredEnd)[0];
+        const item = rankedItem || baseItem;
         window.currentItemData = item;
 
+        // Log analytics
+        await logAnalytics('view_item', itemId, {
+            itemName: item.name,
+            itemCategory: item.category
+        });
+
+        // Track item view in session recording
+        if (currentSessionId) {
+            trackItemView(itemId, item.name);
+        }
+
+        // Increment view count
+        try {
+            await updateDoc(doc(db, 'items', itemId), {
+                views: (item.views || 0) + 1
+            });
+        } catch (error) {
+            console.error('Error updating views:', error);
+            // Non-critical error, continue showing item
+        }
+
         const isOwner = item.ownerId === currentUser.uid;
+
+        // Check for unread messages
+        const chatId = getChatId(itemId, currentUser.uid);
+        const unreadCount = chatId ? await getUnreadCount(chatId) : 0;
+        const unreadBadge = unreadCount > 0 ? `<span class="unread-badge">${unreadCount}</span>` : '';
+
+        // Format availability dates
+        let availabilityHTML = '';
+        if (item.availability) {
+            const startDate = item.availability.startDate ? item.availability.startDate.toDate().toLocaleDateString() : 'Now';
+            const endDate = item.availability.endDate ? item.availability.endDate.toDate().toLocaleDateString() : 'Ongoing';
+
+            if (item.availability.startDate || item.availability.endDate) {
+                availabilityHTML = `
+                    <div class="item-availability">
+                        <h3>Availability</h3>
+                        <p>📅 ${startDate} - ${endDate}</p>
+                    </div>
+                `;
+            }
+        }
 
         const detailContent = document.getElementById('itemDetailContent');
         detailContent.innerHTML = `
@@ -170,17 +827,20 @@ window.showItemDetail = async function (itemId) {
             <h2>${item.name}</h2>
             <span class="item-category">${item.category}</span>
             <div class="item-price">${formatPrice(item.price)}</div>
+            ${renderMatchBreakdown(item)}
             <div class="item-description">
                 <h3>Description</h3>
                 <p>${item.description}</p>
             </div>
+            ${availabilityHTML}
             <div class="item-owner">
                 <strong>Listed by:</strong> ${item.ownerName} (${item.ownerEmail})
             </div>
             <div class="detail-actions">
                 ${isOwner ?
                 '<button class="btn-secondary" onclick="showView(\'homeView\')">Back to Listings</button>' :
-                `<button class="btn-primary" onclick="openChat('${itemId}')">💬 Chat with Owner</button>
+                `<button class="btn-primary" onclick="openBookingModal('${itemId}')">📅 Request to Book</button>
+                     <button class="btn-primary chat-btn-with-badge" onclick="openChat('${itemId}')">💬 Chat with Owner${unreadBadge}</button>
                      <button class="btn-secondary" onclick="showView('homeView')">Back</button>`
             }
             </div>
@@ -198,6 +858,17 @@ window.openChat = async function (itemId) {
     const item = window.currentItemData;
     if (!item) return;
 
+    // Log analytics
+    await logAnalytics('open_chat', itemId, {
+        itemName: item.name,
+        ownerId: item.ownerId
+    });
+
+    // Track chat open in session recording
+    if (currentSessionId) {
+        trackChatOpen(itemId, item.name);
+    }
+
     const chatId = getChatId(itemId, currentUser.uid);
     currentChatId = chatId;
     currentItemId = itemId;
@@ -208,6 +879,9 @@ window.openChat = async function (itemId) {
         <div><strong>With:</strong> ${item.ownerName}</div>
     `;
 
+    // Mark messages as read
+    await updateLastRead(chatId);
+
     // Listen to messages in real-time
     listenToMessages(chatId);
 
@@ -216,17 +890,29 @@ window.openChat = async function (itemId) {
 
 // Listen to messages in real-time
 function listenToMessages(chatId) {
-    // Unsubscribe from previous listener if exists
+    // Unsubscribe from previous listeners if exists
     if (unsubscribeMessages) {
         unsubscribeMessages();
     }
+    if (unsubscribeTypingIndicator) {
+        unsubscribeTypingIndicator();
+    }
 
+    const messagesContainer = document.getElementById('chatMessages');
+
+    // Track scroll position to enable smart auto-scroll
+    messagesContainer.addEventListener('scroll', () => {
+        const threshold = 100; // px from bottom
+        const position = messagesContainer.scrollTop + messagesContainer.clientHeight;
+        const height = messagesContainer.scrollHeight;
+        isNearBottom = (height - position) < threshold;
+    });
+
+    // Listen to messages
     const messagesRef = collection(db, 'chats', chatId, 'messages');
     const q = query(messagesRef, orderBy('createdAt', 'asc'));
 
     unsubscribeMessages = onSnapshot(q, (snapshot) => {
-        const messagesContainer = document.getElementById('chatMessages');
-
         if (snapshot.empty) {
             messagesContainer.innerHTML = `
                 <div class="empty-state">
@@ -237,7 +923,9 @@ function listenToMessages(chatId) {
             return;
         }
 
+        const previousScrollHeight = messagesContainer.scrollHeight;
         messagesContainer.innerHTML = '';
+
         snapshot.forEach((doc) => {
             const msg = doc.data();
             const isSent = msg.senderId === currentUser.uid;
@@ -253,10 +941,43 @@ function listenToMessages(chatId) {
             messagesContainer.appendChild(messageDiv);
         });
 
-        // Scroll to bottom
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        // Smart auto-scroll: only scroll if user was near bottom or if new message is from current user
+        if (isNearBottom || snapshot.docChanges().some(change => {
+            return change.type === 'added' && change.doc.data().senderId === currentUser.uid;
+        })) {
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        } else {
+            // Maintain scroll position when new messages arrive from others
+            messagesContainer.scrollTop = messagesContainer.scrollHeight - previousScrollHeight;
+        }
     }, (error) => {
         console.error('Error listening to messages:', error);
+    });
+
+    // Listen to typing indicators
+    const chatRef = doc(db, 'chats', chatId);
+    unsubscribeTypingIndicator = onSnapshot(chatRef, (docSnap) => {
+        const typingContainer = document.getElementById('typingIndicatorContainer');
+        if (!typingContainer) return;
+
+        if (docSnap.exists()) {
+            const chatData = docSnap.data();
+            const typingUsers = chatData.typing || {};
+
+            // Filter out current user and get other users who are typing
+            const otherTypingUsers = Object.entries(typingUsers)
+                .filter(([uid]) => uid !== currentUser.uid)
+                .map(([, data]) => data.name);
+
+            if (otherTypingUsers.length > 0) {
+                const names = otherTypingUsers.join(', ');
+                typingContainer.innerHTML = `<div class="typing-indicator">${names} ${otherTypingUsers.length === 1 ? 'is' : 'are'} typing...</div>`;
+                typingContainer.style.display = 'block';
+            } else {
+                typingContainer.innerHTML = '';
+                typingContainer.style.display = 'none';
+            }
+        }
     });
 }
 
@@ -268,6 +989,13 @@ async function sendMessage() {
     if (!text || !currentChatId) return;
 
     try {
+        // Clear typing indicator before sending
+        await setTypingIndicator(currentChatId, false);
+        if (typingTimeout) {
+            clearTimeout(typingTimeout);
+            typingTimeout = null;
+        }
+
         const messagesRef = collection(db, 'chats', currentChatId, 'messages');
 
         await addDoc(messagesRef, {
@@ -278,10 +1006,533 @@ async function sendMessage() {
             createdAt: serverTimestamp()
         });
 
+        // Log analytics
+        await logAnalytics('send_message', currentItemId, {
+            chatId: currentChatId,
+            messageLength: text.length
+        });
+
         input.value = '';
     } catch (error) {
         console.error('Error sending message:', error);
         alert('Failed to send message. Please try again.');
+    }
+}
+
+/**
+ * Handle typing events in chat input to show/hide typing indicator
+ */
+function handleChatTyping() {
+    if (!currentChatId) return;
+
+    // Set typing indicator
+    setTypingIndicator(currentChatId, true);
+
+    // Clear existing timeout
+    if (typingTimeout) {
+        clearTimeout(typingTimeout);
+    }
+
+    // Clear typing indicator after 3 seconds of inactivity
+    typingTimeout = setTimeout(() => {
+        setTypingIndicator(currentChatId, false);
+        typingTimeout = null;
+    }, 3000);
+}
+
+/**
+ * Load all chats for the current user with unread counts
+ */
+async function loadMyChats() {
+    try {
+        const chatsList = document.getElementById('chatsList');
+        chatsList.innerHTML = '<div class="loading">Loading chats...</div>';
+
+        // Get all items to build chat metadata
+        const itemsSnapshot = await getDocs(collection(db, 'items'));
+        const itemsMap = {};
+        itemsSnapshot.forEach((doc) => {
+            itemsMap[doc.id] = { id: doc.id, ...doc.data() };
+        });
+
+        // Get all chats involving the current user
+        const chatsSnapshot = await getDocs(collection(db, 'chats'));
+        const userChats = [];
+
+        for (const chatDoc of chatsSnapshot.docs) {
+            const chatId = chatDoc.id;
+            const chatData = chatDoc.data();
+
+            // Parse chat ID format: itemId_userId1_userId2
+            const parts = chatId.split('_');
+            if (parts.length < 3) continue;
+
+            const itemId = parts[0];
+            const user1 = parts[1];
+            const user2 = parts[2];
+
+            // Check if current user is part of this chat
+            if (user1 !== currentUser.uid && user2 !== currentUser.uid) continue;
+
+            // Get the other user
+            const otherUserId = user1 === currentUser.uid ? user2 : user1;
+
+            // Get item details
+            const item = itemsMap[itemId];
+            if (!item) continue;
+
+            // Get last message
+            const messagesRef = collection(db, 'chats', chatId, 'messages');
+            const messagesQuery = query(messagesRef, orderBy('createdAt', 'desc'), limit(1));
+            const messagesSnapshot = await getDocs(messagesQuery);
+
+            let lastMessage = null;
+            let lastMessageTime = null;
+            if (!messagesSnapshot.empty) {
+                const msgData = messagesSnapshot.docs[0].data();
+                lastMessage = msgData.text;
+                lastMessageTime = msgData.createdAt;
+            }
+
+            // Get unread count
+            const unreadCount = await getUnreadCount(chatId);
+
+            // Determine other user name
+            const otherUserName = otherUserId === item.ownerId ? item.ownerName :
+                                  (item.ownerId === currentUser.uid ?
+                                   messagesSnapshot.docs[0]?.data()?.senderName || 'Unknown' :
+                                   item.ownerName);
+
+            userChats.push({
+                chatId,
+                itemId,
+                itemName: item.name,
+                itemEmoji: item.emoji || '📦',
+                otherUserName,
+                lastMessage,
+                lastMessageTime,
+                unreadCount
+            });
+        }
+
+        // Sort by most recent message
+        userChats.sort((a, b) => {
+            if (!a.lastMessageTime) return 1;
+            if (!b.lastMessageTime) return -1;
+            return b.lastMessageTime - a.lastMessageTime;
+        });
+
+        if (userChats.length === 0) {
+            chatsList.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-emoji">💬</div>
+                    <p>No chats yet. Start chatting about items!</p>
+                </div>
+            `;
+            return;
+        }
+
+        chatsList.innerHTML = userChats.map(chat => {
+            const unreadBadge = chat.unreadCount > 0
+                ? `<span class="unread-badge">${chat.unreadCount}</span>`
+                : '';
+
+            const lastMessagePreview = chat.lastMessage
+                ? chat.lastMessage.substring(0, 50) + (chat.lastMessage.length > 50 ? '...' : '')
+                : 'No messages yet';
+
+            const timeAgo = chat.lastMessageTime
+                ? formatTimeAgo(chat.lastMessageTime.toDate())
+                : '';
+
+            return `
+                <div class="chat-list-item" onclick="openChatFromList('${chat.itemId}', '${chat.chatId}')">
+                    <div class="chat-item-emoji">${chat.itemEmoji}</div>
+                    <div class="chat-item-content">
+                        <div class="chat-item-header">
+                            <h3>${chat.itemName}</h3>
+                            ${unreadBadge}
+                        </div>
+                        <div class="chat-item-subtitle">with ${chat.otherUserName}</div>
+                        <div class="chat-item-preview">${lastMessagePreview}</div>
+                    </div>
+                    <div class="chat-item-time">${timeAgo}</div>
+                </div>
+            `;
+        }).join('');
+
+        showView('myChatsView');
+    } catch (error) {
+        console.error('Error loading chats:', error);
+        document.getElementById('chatsList').innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-emoji">❌</div>
+                <p>Error loading chats. Please refresh.</p>
+            </div>
+        `;
+    }
+}
+
+/**
+ * Format timestamp as relative time (e.g., "5m ago", "2h ago")
+ */
+function formatTimeAgo(date) {
+    const seconds = Math.floor((new Date() - date) / 1000);
+
+    if (seconds < 60) return 'just now';
+
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+
+    const days = Math.floor(hours / 24);
+    if (days < 7) return `${days}d ago`;
+
+    const weeks = Math.floor(days / 7);
+    if (weeks < 4) return `${weeks}w ago`;
+
+    return date.toLocaleDateString();
+}
+
+/**
+ * Open chat from the chat list
+ */
+window.openChatFromList = async function(itemId, chatId) {
+    try {
+        // Load item data
+        const itemDoc = await getDoc(doc(db, 'items', itemId));
+        if (!itemDoc.exists()) {
+            alert('Item not found');
+            return;
+        }
+
+        window.currentItemData = { id: itemDoc.id, ...itemDoc.data() };
+        await openChat(itemId);
+    } catch (error) {
+        console.error('Error opening chat from list:', error);
+        alert('Error opening chat');
+    }
+};
+
+// Booking Functions
+// Open booking modal
+window.openBookingModal = function(itemId) {
+    currentItemId = itemId;
+    const modal = document.getElementById('bookingModal');
+    modal.classList.add('active');
+
+    // Set minimum date to today
+    const today = new Date().toISOString().split('T')[0];
+    document.getElementById('bookingStartDate').setAttribute('min', today);
+    document.getElementById('bookingEndDate').setAttribute('min', today);
+};
+
+// Close booking modal
+function closeBookingModal() {
+    const modal = document.getElementById('bookingModal');
+    modal.classList.remove('active');
+    document.getElementById('bookingForm').reset();
+}
+
+// Preferences modal helpers
+function openPreferencesModal() {
+    const modal = document.getElementById('preferencesModal');
+    modal.classList.add('active');
+
+    const categories = userPreferences?.categories || [];
+    document.querySelectorAll('input[name="prefCategory"]').forEach(box => {
+        box.checked = categories.includes(box.value);
+    });
+
+    const weights = userPreferences?.weights || { price: 3, category: 3, availability: 3, urgency: 3 };
+    const sliders = [
+        { id: 'weightPrice', value: weights.price },
+        { id: 'weightCategory', value: weights.category },
+        { id: 'weightAvailability', value: weights.availability },
+        { id: 'weightUrgency', value: weights.urgency }
+    ];
+    sliders.forEach(({ id, value }) => {
+        const el = document.getElementById(id);
+        if (el) el.value = value;
+        const label = document.getElementById(`${id}Value`);
+        if (label) label.textContent = value;
+    });
+    updatePreferencesPreview();
+
+    const maxPriceInput = document.getElementById('preferencesMaxPrice');
+    maxPriceInput.value = userPreferences?.maxPrice ?? '';
+
+    const dateFromInput = document.getElementById('preferencesDateFrom');
+    const dateToInput = document.getElementById('preferencesDateTo');
+    dateFromInput.value = userPreferences?.dateFrom ? userPreferences.dateFrom.toISOString().split('T')[0] : '';
+    dateToInput.value = userPreferences?.dateTo ? userPreferences.dateTo.toISOString().split('T')[0] : '';
+}
+
+function closePreferencesModal() {
+    const modal = document.getElementById('preferencesModal');
+    modal.classList.remove('active');
+    document.getElementById('preferencesForm').reset();
+}
+
+/**
+ * Save user preferences to Firestore including multi-weight sliders
+ * Weights are stored on a 0-5 scale for: price, category, availability, urgency
+ * These weights adjust the ranking algorithm to personalize item recommendations
+ * @param {Event} event - Form submission event
+ */
+async function savePreferences(event) {
+    event.preventDefault();
+
+    const categories = Array.from(document.querySelectorAll('input[name="prefCategory"]:checked')).map(c => c.value);
+    const maxPriceValue = document.getElementById('preferencesMaxPrice').value;
+    const dateFromStr = document.getElementById('preferencesDateFrom').value;
+    const dateToStr = document.getElementById('preferencesDateTo').value;
+    const weights = {
+        price: parseInt(document.getElementById('weightPrice').value, 10),
+        category: parseInt(document.getElementById('weightCategory').value, 10),
+        availability: parseInt(document.getElementById('weightAvailability').value, 10),
+        urgency: parseInt(document.getElementById('weightUrgency').value, 10)
+    };
+
+    const maxPrice = maxPriceValue === '' ? null : parseFloat(maxPriceValue);
+    const dateFrom = dateFromStr ? new Date(dateFromStr) : null;
+    const dateTo = dateToStr ? new Date(dateToStr) : null;
+
+    try {
+        const prefDocRef = doc(db, 'users', currentUser.uid, 'preferences', 'default');
+        await setDoc(prefDocRef, {
+            categories,
+            maxPrice: Number.isNaN(maxPrice) ? null : maxPrice,
+            dateFrom: dateFrom ? Timestamp.fromDate(dateFrom) : null,
+            dateTo: dateTo ? Timestamp.fromDate(dateTo) : null,
+            weights
+        });
+
+        userPreferences = {
+            categories,
+            maxPrice: Number.isNaN(maxPrice) ? null : maxPrice,
+            dateFrom,
+            dateTo,
+            weights
+        };
+
+        closePreferencesModal();
+        await loadItems();
+        alert('✅ Preferences saved');
+    } catch (error) {
+        console.error('Error saving preferences:', error);
+        alert('Failed to save preferences. Please try again.');
+    }
+}
+
+// Test Listings Functions
+function generateFakeListingsData() {
+    const fakeItems = [
+        { name: "Professional Coffee Maker", category: "Kitchen", description: "High-end espresso machine with milk frother and programmable settings. Perfect for coffee enthusiasts.", price: 12 },
+        { name: "Wireless Gaming Headset", category: "Electronics", description: "Surround sound gaming headset with noise cancellation and RGB lighting. Compatible with all major platforms.", price: 8 },
+        { name: "Modern Floor Lamp", category: "Furniture", description: "Adjustable LED floor lamp with remote control and multiple brightness settings. Great for reading corners.", price: 6 },
+        { name: "Air Fryer XL", category: "Kitchen", description: "7-quart capacity air fryer with digital controls and preset cooking functions. Healthy cooking made easy.", price: 10 },
+        { name: "Portable Bluetooth Speaker", category: "Electronics", description: "Waterproof speaker with 20-hour battery life and premium sound quality. Perfect for outdoor activities.", price: 7 },
+        { name: "Ergonomic Office Chair", category: "Furniture", description: "Adjustable lumbar support office chair with breathable mesh and armrests. Promotes better posture.", price: 9 },
+        { name: "Robot Vacuum Cleaner", category: "Appliances", description: "Smart robot vacuum with app control and automatic charging. Works on carpets and hard floors.", price: 13 },
+        { name: "Electric Kettle", category: "Kitchen", description: "Fast-boiling electric kettle with temperature control and auto shut-off. 1.7L capacity.", price: 5 },
+        { name: "Portable Monitor", category: "Electronics", description: "15.6 inch USB-C portable monitor for laptops. Perfect for dual-screen productivity on the go.", price: 11 },
+        { name: "Storage Ottoman", category: "Furniture", description: "Multi-functional storage ottoman that doubles as seating. Faux leather upholstery with hidden storage.", price: 0 }
+    ];
+
+    return fakeItems.map(item => ({
+        name: item.name,
+        category: item.category,
+        description: item.description,
+        price: item.price,
+        emoji: itemEmojis[item.category],
+        ownerId: currentUser.uid,
+        ownerName: currentUser.displayName || currentUser.email.split('@')[0],
+        ownerEmail: currentUser.email,
+        availability: {
+            startDate: null,
+            endDate: null
+        },
+        views: 0,
+        createdAt: serverTimestamp()
+    }));
+}
+
+// Open test listings modal
+function openTestListingsModal() {
+    const modal = document.getElementById('testListingsModal');
+    modal.classList.add('active');
+}
+
+// Close test listings modal
+function closeTestListingsModal() {
+    const modal = document.getElementById('testListingsModal');
+    modal.classList.remove('active');
+}
+
+// Generate fake listings
+async function generateFakeListings() {
+    if (!confirm('This will create 10 test listings under your account. Continue?')) {
+        return;
+    }
+
+    try {
+        const fakeItems = generateFakeListingsData();
+
+        for (const item of fakeItems) {
+            await addDoc(collection(db, 'items'), item);
+        }
+
+        closeTestListingsModal();
+        await loadItems();
+        alert('✅ Successfully generated 10 test listings!');
+    } catch (error) {
+        console.error('Error generating fake listings:', error);
+        alert('❌ Failed to generate listings. Please try again.');
+    }
+}
+
+// Clear all my listings
+async function clearMyListings() {
+    if (!confirm('This will DELETE ALL your listings permanently. Are you sure?')) {
+        return;
+    }
+
+    try {
+        const q = query(
+            collection(db, 'items'),
+            where('ownerId', '==', currentUser.uid)
+        );
+
+        const querySnapshot = await getDocs(q);
+
+        if (querySnapshot.empty) {
+            alert('You have no listings to delete.');
+            return;
+        }
+
+        let count = 0;
+        for (const itemDoc of querySnapshot.docs) {
+            await deleteDoc(doc(db, 'items', itemDoc.id));
+            count++;
+        }
+
+        closeTestListingsModal();
+        await loadItems();
+        alert(`✅ Successfully deleted ${count} listing(s)!`);
+    } catch (error) {
+        console.error('Error clearing listings:', error);
+        alert('❌ Failed to clear listings. Please try again.');
+    }
+}
+
+// Submit booking request
+async function submitBookingRequest(event) {
+    event.preventDefault();
+
+    const startDateStr = document.getElementById('bookingStartDate').value;
+    const endDateStr = document.getElementById('bookingEndDate').value;
+
+    if (!startDateStr || !endDateStr) {
+        alert('Please select both start and end dates');
+        return;
+    }
+
+    const startDate = new Date(startDateStr);
+    const endDate = new Date(endDateStr);
+
+    // Validate dates
+    if (endDate <= startDate) {
+        alert('End date must be after start date');
+        return;
+    }
+
+    const item = window.currentItemData;
+    if (!item) {
+        alert('Item not found');
+        return;
+    }
+    if (item.ownerId === currentUser.uid) {
+        alert('You cannot book your own item.');
+        return;
+    }
+
+    // Validate against item availability if set
+    if (item.availability) {
+        if (item.availability.startDate) {
+            const itemStartDate = item.availability.startDate.toDate();
+            if (startDate < itemStartDate) {
+                alert(`Item is only available from ${itemStartDate.toLocaleDateString()}`);
+                return;
+            }
+        }
+
+        if (item.availability.endDate) {
+            const itemEndDate = item.availability.endDate.toDate();
+            if (endDate > itemEndDate) {
+                alert(`Item is only available until ${itemEndDate.toLocaleDateString()}`);
+                return;
+            }
+        }
+    }
+
+    try {
+        const lockIds = buildLockIds(currentItemId, startDate, endDate);
+        const batch = writeBatch(db);
+        const bookingRef = doc(collection(db, 'bookings'));
+
+        batch.set(bookingRef, {
+            itemId: currentItemId,
+            itemName: item.name,
+            renterId: currentUser.uid,
+            renterName: currentUser.displayName || currentUser.email.split('@')[0],
+            renterEmail: currentUser.email,
+            ownerId: item.ownerId,
+            ownerName: item.ownerName,
+            ownerEmail: item.ownerEmail,
+            startDate: Timestamp.fromDate(startDate),
+            endDate: Timestamp.fromDate(endDate),
+            status: 'pending',
+            statusHistory: [{ status: 'pending', at: serverTimestamp(), by: currentUser.uid }],
+            lockIds,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp()
+        });
+
+        lockIds.forEach(id => {
+            batch.set(doc(db, 'bookingLocks', id), {
+                bookingId: bookingRef.id,
+                itemId: currentItemId,
+                date: id.split('_')[1],
+                ownerId: item.ownerId,
+                createdAt: serverTimestamp()
+            });
+        });
+
+        await batch.commit();
+
+        // Log analytics
+        const daysDuration = Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24));
+        await logAnalytics('request_booking', currentItemId, {
+            itemName: item.name,
+            ownerId: item.ownerId,
+            startDate: startDate.toISOString(),
+            endDate: endDate.toISOString(),
+            durationDays: daysDuration
+        });
+
+        // Track booking attempt in session recording
+        if (currentSessionId) {
+            trackBookingAttempt(currentItemId, item.name, startDateStr, endDateStr);
+        }
+
+        closeBookingModal();
+        alert('✅ Booking request submitted successfully!');
+    } catch (error) {
+        console.error('Error submitting booking request:', error);
+        alert('Failed to submit booking request. Please try again.');
     }
 }
 
@@ -293,6 +1544,22 @@ async function createListing(event) {
     const category = document.getElementById('itemCategory').value;
     const description = document.getElementById('itemDescription').value;
     const price = parseFloat(document.getElementById('itemPrice').value);
+    const availableFromStr = document.getElementById('availableFrom').value;
+    const availableUntilStr = document.getElementById('availableUntil').value;
+
+    // Build availability object
+    const availability = {
+        startDate: availableFromStr ? Timestamp.fromDate(new Date(availableFromStr)) : null,
+        endDate: availableUntilStr ? Timestamp.fromDate(new Date(availableUntilStr)) : null
+    };
+
+    // Validate availability dates if both are provided
+    if (availability.startDate && availability.endDate) {
+        if (availability.endDate.toDate() <= availability.startDate.toDate()) {
+            alert('Available Until date must be after Available From date');
+            return;
+        }
+    }
 
     try {
         await addDoc(collection(db, 'items'), {
@@ -304,6 +1571,8 @@ async function createListing(event) {
             ownerId: currentUser.uid,
             ownerName: currentUser.displayName || currentUser.email.split('@')[0],
             ownerEmail: currentUser.email,
+            availability,
+            views: 0,
             createdAt: serverTimestamp()
         });
 
@@ -362,9 +1631,1513 @@ async function loadMyItems() {
     }
 }
 
+// Load bookings for renter dashboard
+async function loadMyBookings() {
+    try {
+        const q = query(
+            collection(db, 'bookings'),
+            where('renterId', '==', currentUser.uid),
+            orderBy('createdAt', 'desc')
+        );
+
+        const snapshot = await getDocs(q);
+        const groups = {
+            pending: [],
+            accepted: [],
+            declined: [],
+            archived: []
+        };
+
+        snapshot.forEach((docSnap) => {
+            const booking = { id: docSnap.id, ...docSnap.data() };
+            const normalized = booking.status === 'confirmed' ? 'accepted' : booking.status;
+            const status = normalized || 'pending';
+            if (groups[status]) {
+                groups[status].push(booking);
+            }
+        });
+
+        const sections = {
+            pending: document.getElementById('myBookingsPending'),
+            accepted: document.getElementById('myBookingsConfirmed'),
+            declined: document.getElementById('myBookingsDeclined'),
+            archived: document.getElementById('myBookingsArchived')
+        };
+
+        Object.entries(groups).forEach(([status, bookings]) => {
+            const container = sections[status];
+            if (!container) return;
+
+            if (bookings.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-emoji">📅</div>
+                        <p>No ${status} bookings</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = bookings.map(booking => {
+                const startDate = booking.startDate.toDate().toLocaleDateString();
+                const endDate = booking.endDate.toDate().toLocaleDateString();
+                const statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                const isBookedRange = status === 'accepted';
+                const badge = isBookedRange
+                    ? '<span class="booking-status status-unavailable">Unavailable (Booked)</span>'
+                    : `<span class="booking-status status-${status}">${statusLabel}</span>`;
+
+                return `
+                    <div class="booking-request-card">
+                        <div class="booking-header">
+                            <h3>${booking.itemName}</h3>
+                            ${badge}
+                        </div>
+                        <div class="booking-details">
+                            <div class="booking-info">
+                                <strong>Owner:</strong> ${booking.ownerName} (${booking.ownerEmail})
+                            </div>
+                            <div class="booking-info">
+                                <strong>Dates:</strong> ${startDate} - ${endDate}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        });
+    } catch (error) {
+        console.error('Error loading my bookings:', error);
+        alert('Error loading your bookings');
+    }
+}
+
+// Owner booking management
+async function loadOwnerBookings() {
+    try {
+        const q = query(
+            collection(db, 'bookings'),
+            where('ownerId', '==', currentUser.uid),
+            orderBy('createdAt', 'desc')
+        );
+
+        const snapshot = await getDocs(q);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const groups = {
+            pending: [],
+            accepted: [],
+            declined: [],
+            archived: []
+        };
+
+        snapshot.forEach((docSnap) => {
+            const booking = { id: docSnap.id, ...docSnap.data() };
+            const normalized = booking.status === 'confirmed' ? 'accepted' : booking.status;
+            const status = normalized || 'pending';
+            const endDate = booking.endDate.toDate();
+            if ((status === 'accepted' || status === 'pending') && endDate < today) {
+                groups.archived.push(booking);
+                return;
+            }
+            if (groups[status]) {
+                groups[status].push(booking);
+            } else {
+                groups.archived.push(booking);
+            }
+        });
+
+        const sectionIds = {
+            pending: 'ownerPending',
+            accepted: 'ownerConfirmed',
+            declined: 'ownerDeclined',
+            archived: 'ownerHistory'
+        };
+
+        Object.entries(sectionIds).forEach(([status, containerId]) => {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+
+            const bookings = groups[status] || [];
+            if (bookings.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-emoji">📅</div>
+                        <p>No ${status} bookings</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = bookings.map(booking => {
+                const startDate = booking.startDate.toDate().toLocaleDateString();
+                const endDate = booking.endDate.toDate().toLocaleDateString();
+                const statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
+
+                const isBookedRange = status === 'accepted';
+                const badge = isBookedRange
+                    ? '<span class="booking-status status-unavailable">Unavailable (Booked)</span>'
+                    : `<span class="booking-status status-${status}">${statusLabel}</span>`;
+
+                const actions = status === 'pending' ? `
+                        <div class="booking-actions">
+                            <button class="btn-primary" onclick="handleBookingAction('${booking.id}', 'accepted')">✅ Accept</button>
+                            <button class="btn-secondary" onclick="handleBookingAction('${booking.id}', 'declined')">❌ Decline</button>
+                        </div>
+                    ` : '';
+
+                return `
+                    <div class="booking-request-card">
+                        <div class="booking-header">
+                            <h3>${booking.itemName}</h3>
+                            ${badge}
+                        </div>
+                        <div class="booking-details">
+                            <div class="booking-info">
+                                <strong>Renter:</strong> ${booking.renterName} (${booking.renterEmail})
+                            </div>
+                            <div class="booking-info">
+                                <strong>Dates:</strong> ${startDate} - ${endDate}
+                            </div>
+                        </div>
+                        ${actions}
+                    </div>
+                `;
+            }).join('');
+        });
+
+        setOwnerBookingsTab('pending');
+    } catch (error) {
+        console.error('Error loading owner bookings:', error);
+        ['ownerPending', 'ownerConfirmed', 'ownerDeclined', 'ownerHistory'].forEach(id => {
+            const container = document.getElementById(id);
+            if (container) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-emoji">❌</div>
+                        <p>Error loading bookings. Please refresh.</p>
+                    </div>
+                `;
+            }
+        });
+    }
+}
+
+function setOwnerBookingsTab(tab) {
+    const mapping = {
+        pending: 'ownerPending',
+        accepted: 'ownerConfirmed',
+        declined: 'ownerDeclined',
+        archived: 'ownerHistory'
+    };
+    const buttonIds = {
+        pending: 'ownerTabPending',
+        accepted: 'ownerTabConfirmed',
+        declined: 'ownerTabDeclined',
+        archived: 'ownerTabHistory'
+    };
+
+    Object.entries(mapping).forEach(([name, id]) => {
+        const btn = document.getElementById(buttonIds[name]);
+        const section = document.getElementById(id);
+        if (btn) {
+            btn.classList.toggle('active', name === tab);
+        }
+        if (section) {
+            section.classList.toggle('hidden', name !== tab);
+            section.style.display = name === tab ? 'block' : 'none';
+        }
+    });
+}
+
+// Handle booking action (accept/decline)
+window.handleBookingAction = async function(bookingId, newStatus) {
+    if (!['accepted', 'declined'].includes(newStatus)) return;
+
+    try {
+        const bookingRef = doc(db, 'bookings', bookingId);
+        await updateDoc(bookingRef, {
+            status: newStatus,
+            statusHistory: arrayUnion({ status: newStatus, at: serverTimestamp(), by: currentUser.uid }),
+            updatedAt: serverTimestamp()
+        });
+
+        const statusText = newStatus === 'accepted' ? 'accepted' : 'declined';
+        alert(`✅ Booking request ${statusText} successfully!`);
+
+        // Reload booking requests
+        loadOwnerBookings();
+    } catch (error) {
+        console.error('Error updating booking:', error);
+        alert('Failed to update booking. Please try again.');
+    }
+};
+
+// Global dashboard state
+let currentPeriod = 'daily';
+let dashboardData = null;
+let replayInterval = null;
+
+// Session Recording State
+let currentSessionId = null;
+let sessionStartTime = null;
+let lastScrollPosition = { x: 0, y: 0 };
+let scrollDebounceTimer = null;
+let lastEventTime = Date.now();
+
+/**
+ * Firestore Schema for Session Recording:
+ *
+ * sessions/{sessionId}/
+ * {
+ *   userId: string,
+ *   startTime: Timestamp,
+ *   endTime: Timestamp,
+ *   duration: number (ms),
+ *   userAgent: string,
+ *   screenResolution: { width, height },
+ *   eventsCount: number,
+ *   metadata: {
+ *     initialUrl: string,
+ *     finalUrl: string
+ *   }
+ * }
+ *
+ * sessions/{sessionId}/events/{eventId}/
+ * {
+ *   timestamp: Timestamp,
+ *   relativeTime: number (ms from session start),
+ *   type: 'view' | 'scroll' | 'click' | 'search' | 'item_view' | 'chat_open' | 'booking' | 'navigation',
+ *   data: {
+ *     // Type-specific data
+ *     url?: string,
+ *     scrollX?: number,
+ *     scrollY?: number,
+ *     elementId?: string,
+ *     elementClass?: string,
+ *     elementText?: string,
+ *     searchQuery?: string,
+ *     itemId?: string,
+ *     itemName?: string,
+ *     chatId?: string,
+ *     bookingId?: string,
+ *     viewName?: string
+ *   },
+ *   timeSinceLastEvent: number (ms)
+ * }
+ */
+
+/**
+ * Initialize session recording for current user
+ */
+async function initSessionRecording() {
+    if (!currentUser) return;
+
+    // Generate unique session ID
+    currentSessionId = `session_${currentUser.uid}_${Date.now()}`;
+    sessionStartTime = Date.now();
+    lastEventTime = sessionStartTime;
+
+    try {
+        // Create session document
+        await setDoc(doc(db, 'sessions', currentSessionId), {
+            userId: currentUser.uid,
+            userEmail: currentUser.email,
+            startTime: serverTimestamp(),
+            endTime: null,
+            duration: null,
+            userAgent: navigator.userAgent,
+            screenResolution: {
+                width: window.innerWidth,
+                height: window.innerHeight
+            },
+            eventsCount: 0,
+            metadata: {
+                initialUrl: window.location.pathname,
+                finalUrl: null
+            }
+        });
+
+        // Log initial page view
+        await logSessionEvent('navigation', {
+            url: window.location.pathname,
+            viewName: 'homeView'
+        });
+
+        console.log(`📹 Session recording started: ${currentSessionId}`);
+    } catch (error) {
+        console.error('Error initializing session recording:', error);
+    }
+}
+
+/**
+ * Log a session event with debouncing for certain event types
+ */
+async function logSessionEvent(eventType, data = {}, debounce = false) {
+    if (!currentSessionId || !sessionStartTime) return;
+
+    const now = Date.now();
+    const relativeTime = now - sessionStartTime;
+    const timeSinceLastEvent = now - lastEventTime;
+
+    try {
+        const eventsRef = collection(db, 'sessions', currentSessionId, 'events');
+        await addDoc(eventsRef, {
+            timestamp: serverTimestamp(),
+            relativeTime,
+            type: eventType,
+            data,
+            timeSinceLastEvent
+        });
+
+        // Update session stats
+        await updateDoc(doc(db, 'sessions', currentSessionId), {
+            eventsCount: arrayUnion(now), // Use array length for count
+            endTime: serverTimestamp(),
+            duration: relativeTime,
+            'metadata.finalUrl': window.location.pathname
+        });
+
+        lastEventTime = now;
+    } catch (error) {
+        console.error('Error logging session event:', error);
+    }
+}
+
+/**
+ * Track scroll position with debouncing
+ */
+function trackScroll() {
+    const scrollX = window.scrollX || window.pageXOffset;
+    const scrollY = window.scrollY || window.pageYOffset;
+
+    // Only log if scroll position changed significantly (>50px)
+    if (Math.abs(scrollX - lastScrollPosition.x) > 50 ||
+        Math.abs(scrollY - lastScrollPosition.y) > 50) {
+
+        if (scrollDebounceTimer) {
+            clearTimeout(scrollDebounceTimer);
+        }
+
+        scrollDebounceTimer = setTimeout(() => {
+            logSessionEvent('scroll', {
+                scrollX,
+                scrollY,
+                url: window.location.pathname
+            });
+
+            lastScrollPosition = { x: scrollX, y: scrollY };
+        }, 500); // 500ms debounce
+    }
+}
+
+/**
+ * Track clicks with element information
+ */
+function trackClick(event) {
+    const target = event.target;
+    const data = {
+        elementTag: target.tagName,
+        elementId: target.id || null,
+        elementClass: target.className || null,
+        elementText: target.textContent?.substring(0, 50) || null,
+        url: window.location.pathname,
+        coordinates: {
+            x: event.clientX,
+            y: event.clientY
+        }
+    };
+
+    logSessionEvent('click', data);
+}
+
+/**
+ * Track view changes (navigation between views)
+ */
+function trackViewChange(viewId) {
+    logSessionEvent('navigation', {
+        viewName: viewId,
+        url: window.location.pathname
+    });
+}
+
+/**
+ * Track search queries
+ */
+function trackSearch(query) {
+    if (query && query.trim()) {
+        logSessionEvent('search', {
+            searchQuery: query,
+            queryLength: query.length
+        });
+    }
+}
+
+/**
+ * Track item views
+ */
+function trackItemView(itemId, itemName) {
+    logSessionEvent('item_view', {
+        itemId,
+        itemName,
+        url: window.location.pathname
+    });
+}
+
+/**
+ * Track chat opens
+ */
+function trackChatOpen(itemId, itemName) {
+    logSessionEvent('chat_open', {
+        itemId,
+        itemName
+    });
+}
+
+/**
+ * Track booking attempts
+ */
+function trackBookingAttempt(itemId, itemName, startDate, endDate) {
+    logSessionEvent('booking', {
+        itemId,
+        itemName,
+        startDate: startDate?.toISOString(),
+        endDate: endDate?.toISOString()
+    });
+}
+
+/**
+ * End session recording
+ */
+async function endSessionRecording() {
+    if (!currentSessionId) return;
+
+    try {
+        await updateDoc(doc(db, 'sessions', currentSessionId), {
+            endTime: serverTimestamp(),
+            duration: Date.now() - sessionStartTime
+        });
+
+        console.log(`📹 Session recording ended: ${currentSessionId}`);
+
+        // Reset session state
+        currentSessionId = null;
+        sessionStartTime = null;
+    } catch (error) {
+        console.error('Error ending session recording:', error);
+    }
+}
+
+/**
+ * Setup session recording event listeners
+ */
+function setupSessionRecording() {
+    // Track scrolls
+    window.addEventListener('scroll', trackScroll, { passive: true });
+
+    // Track clicks
+    document.addEventListener('click', trackClick, true);
+
+    // Track page unload
+    window.addEventListener('beforeunload', () => {
+        endSessionRecording();
+    });
+}
+
+/**
+ * Load Advanced Testing Dashboard with funnels, charts, and session replay
+ */
+async function loadTestingDashboard() {
+    try {
+        showView('testingDashboardView');
+
+        // Load all data
+        await refreshDashboardData();
+
+        // Setup period toggle listeners
+        document.querySelectorAll('.period-btn').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                currentPeriod = e.target.dataset.period;
+                await refreshDashboardData();
+            });
+        });
+
+        // Setup session replay listeners (analytics-based)
+        const sessionSelector = document.getElementById('sessionSelector');
+        const replayBtn = document.getElementById('replaySessionBtn');
+        const stopBtn = document.getElementById('stopReplayBtn');
+
+        sessionSelector.addEventListener('change', () => {
+            replayBtn.disabled = !sessionSelector.value;
+        });
+
+        replayBtn.addEventListener('click', () => replaySession(sessionSelector.value));
+        stopBtn.addEventListener('click', stopSessionReplay);
+
+        // Setup detailed session playback controls
+        setupPlaybackControls();
+
+    } catch (error) {
+        console.error('Error loading testing dashboard:', error);
+        alert('Error loading dashboard. Please try again.');
+    }
+}
+
+/**
+ * Refresh all dashboard data and visualizations
+ */
+async function refreshDashboardData() {
+    // Fetch all analytics and bookings data
+    const analyticsSnapshot = await getDocs(collection(db, 'analytics'));
+    const bookingsSnapshot = await getDocs(collection(db, 'bookings'));
+    const itemsSnapshot = await getDocs(collection(db, 'items'));
+
+    // Build items map
+    const itemsMap = {};
+    itemsSnapshot.forEach((doc) => {
+        const item = doc.data();
+        itemsMap[doc.id] = {
+            id: doc.id,
+            name: item.name,
+            category: item.category,
+            emoji: item.emoji
+        };
+    });
+
+    // Process analytics events
+    const events = [];
+    analyticsSnapshot.forEach((doc) => {
+        const data = doc.data();
+        events.push({
+            id: doc.id,
+            ...data,
+            timestamp: data.timestamp?.toDate() || new Date()
+        });
+    });
+
+    // Process bookings for acceptance tracking
+    const acceptedBookings = new Set();
+    bookingsSnapshot.forEach((doc) => {
+        const booking = doc.data();
+        if (booking.status === 'accepted' || booking.status === 'confirmed') {
+            acceptedBookings.add(booking.itemId);
+        }
+    });
+
+    // Filter events by period
+    const filteredEvents = filterEventsByPeriod(events, currentPeriod);
+
+    // Calculate metrics
+    const metrics = calculateMetrics(filteredEvents, acceptedBookings);
+
+    // Update UI
+    updateQuickStats(metrics);
+    renderFunnelChart(metrics.funnel);
+    renderDropoffAnalysis(metrics.dropoff);
+    renderTimelineChart(filteredEvents);
+    renderTopLists(filteredEvents, itemsMap);
+    populateSessionSelector(events);
+
+    // Store for later use
+    dashboardData = { events: filteredEvents, itemsMap, metrics };
+}
+
+/**
+ * Filter events by time period
+ */
+function filterEventsByPeriod(events, period) {
+    const now = new Date();
+    let cutoff = new Date();
+
+    switch (period) {
+        case 'daily':
+            cutoff.setDate(now.getDate() - 1);
+            break;
+        case 'weekly':
+            cutoff.setDate(now.getDate() - 7);
+            break;
+        case 'monthly':
+            cutoff.setMonth(now.getMonth() - 1);
+            break;
+    }
+
+    return events.filter(e => e.timestamp >= cutoff);
+}
+
+/**
+ * Calculate all metrics including funnel and drop-off
+ */
+function calculateMetrics(events, acceptedBookings) {
+    // Group events by user
+    const userJourneys = {};
+
+    events.forEach(event => {
+        const userId = event.userId;
+        if (!userJourneys[userId]) {
+            userJourneys[userId] = {
+                views: 0,
+                chats: 0,
+                bookings: 0,
+                accepted: 0
+            };
+        }
+
+        if (event.action === 'view_item') userJourneys[userId].views++;
+        if (event.action === 'open_chat') userJourneys[userId].chats++;
+        if (event.action === 'request_booking') {
+            userJourneys[userId].bookings++;
+            if (acceptedBookings.has(event.itemId)) {
+                userJourneys[userId].accepted++;
+            }
+        }
+    });
+
+    // Calculate funnel
+    const totalUsers = Object.keys(userJourneys).length;
+    const usersWithViews = Object.values(userJourneys).filter(j => j.views > 0).length;
+    const usersWithChats = Object.values(userJourneys).filter(j => j.chats > 0).length;
+    const usersWithBookings = Object.values(userJourneys).filter(j => j.bookings > 0).length;
+    const usersWithAccepted = Object.values(userJourneys).filter(j => j.accepted > 0).length;
+
+    const funnel = {
+        views: usersWithViews,
+        chats: usersWithChats,
+        bookings: usersWithBookings,
+        accepted: usersWithAccepted
+    };
+
+    // Calculate drop-offs
+    const dropoff = {
+        'View → Chat': {
+            started: usersWithViews,
+            completed: usersWithChats,
+            dropRate: usersWithViews > 0 ? ((usersWithViews - usersWithChats) / usersWithViews * 100).toFixed(1) : 0
+        },
+        'Chat → Booking': {
+            started: usersWithChats,
+            completed: usersWithBookings,
+            dropRate: usersWithChats > 0 ? ((usersWithChats - usersWithBookings) / usersWithChats * 100).toFixed(1) : 0
+        },
+        'Booking → Accepted': {
+            started: usersWithBookings,
+            completed: usersWithAccepted,
+            dropRate: usersWithBookings > 0 ? ((usersWithBookings - usersWithAccepted) / usersWithBookings * 100).toFixed(1) : 0
+        }
+    };
+
+    // Overall metrics
+    const totalViews = events.filter(e => e.action === 'view_item').length;
+    const totalChats = events.filter(e => e.action === 'open_chat').length;
+    const totalBookings = events.filter(e => e.action === 'request_booking').length;
+
+    return { funnel, dropoff, totalViews, totalChats, totalBookings, totalAccepted: usersWithAccepted };
+}
+
+/**
+ * Update quick stats cards
+ */
+function updateQuickStats(metrics) {
+    document.getElementById('metricViews').textContent = metrics.totalViews;
+    document.getElementById('metricChats').textContent = metrics.totalChats;
+    document.getElementById('metricBookings').textContent = metrics.totalBookings;
+    document.getElementById('metricAccepted').textContent = metrics.totalAccepted;
+
+    const conversionRate = metrics.totalViews > 0
+        ? ((metrics.totalBookings / metrics.totalViews) * 100).toFixed(1)
+        : 0;
+    document.getElementById('metricConversion').textContent = `${conversionRate}%`;
+}
+
+/**
+ * Render funnel chart using Canvas
+ */
+function renderFunnelChart(funnel) {
+    const canvas = document.getElementById('funnelChart');
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+
+    // Clear canvas
+    ctx.clearRect(0, 0, width, height);
+
+    // Funnel data
+    const stages = [
+        { label: 'Viewed Item', value: funnel.views, color: '#2d5a3d' },
+        { label: 'Opened Chat', value: funnel.chats, color: '#3d7a52' },
+        { label: 'Requested Booking', value: funnel.bookings, color: '#4ade80' },
+        { label: 'Booking Accepted', value: funnel.accepted, color: '#22c55e' }
+    ];
+
+    const maxValue = Math.max(...stages.map(s => s.value), 1);
+    const stageHeight = 80;
+    const startY = 20;
+    const maxWidth = 500;
+
+    // Draw funnel stages
+    stages.forEach((stage, index) => {
+        const y = startY + (index * stageHeight);
+        const widthPercent = stage.value / maxValue;
+        const stageWidth = maxWidth * widthPercent;
+        const x = (width - stageWidth) / 2;
+
+        // Draw bar
+        ctx.fillStyle = stage.color;
+        ctx.fillRect(x, y, stageWidth, 60);
+
+        // Draw label
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 14px Inter';
+        ctx.textAlign = 'center';
+        ctx.fillText(stage.label, width / 2, y + 25);
+
+        // Draw count
+        ctx.font = 'bold 20px Inter';
+        ctx.fillText(stage.value.toString(), width / 2, y + 50);
+
+        // Draw conversion rate
+        if (index > 0) {
+            const prevValue = stages[index - 1].value;
+            const convRate = prevValue > 0 ? ((stage.value / prevValue) * 100).toFixed(1) : 0;
+            ctx.fillStyle = '#666666';
+            ctx.font = '12px Inter';
+            ctx.fillText(`${convRate}% conversion`, width / 2, y - 5);
+        }
+    });
+
+    // Update stats below chart
+    const statsContainer = document.getElementById('funnelStats');
+    const overallConversion = funnel.views > 0
+        ? ((funnel.accepted / funnel.views) * 100).toFixed(1)
+        : 0;
+
+    statsContainer.innerHTML = `
+        <div class="funnel-stat">
+            <strong>Overall Conversion:</strong> ${overallConversion}% (View → Accepted)
+        </div>
+        <div class="funnel-stat">
+            <strong>Drop-off Points:</strong>
+            View→Chat: ${funnel.views - funnel.chats} users |
+            Chat→Booking: ${funnel.chats - funnel.bookings} users |
+            Booking→Accepted: ${funnel.bookings - funnel.accepted} users
+        </div>
+    `;
+}
+
+/**
+ * Render drop-off analysis
+ */
+function renderDropoffAnalysis(dropoff) {
+    const container = document.getElementById('dropoffAnalysis');
+    if (!container) return;
+
+    const sortedSteps = Object.entries(dropoff)
+        .sort((a, b) => parseFloat(b[1].dropRate) - parseFloat(a[1].dropRate));
+
+    if (sortedSteps.length === 0) {
+        container.innerHTML = '<div class="empty-state"><p>No drop-off data yet</p></div>';
+        return;
+    }
+
+    container.innerHTML = sortedSteps.map(([step, data], index) => {
+        const severity = data.dropRate > 50 ? 'critical' : data.dropRate > 25 ? 'warning' : 'ok';
+        return `
+            <div class="dropoff-item ${severity}">
+                <div class="dropoff-rank">#${index + 1}</div>
+                <div class="dropoff-content">
+                    <h4>${step}</h4>
+                    <div class="dropoff-stats">
+                        <span>${data.started} started</span>
+                        <span>→</span>
+                        <span>${data.completed} completed</span>
+                    </div>
+                </div>
+                <div class="dropoff-rate">
+                    <div class="dropoff-percentage ${severity}">${data.dropRate}%</div>
+                    <div class="dropoff-label">drop-off</div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+/**
+ * Render timeline chart showing activity over time
+ */
+function renderTimelineChart(events) {
+    const canvas = document.getElementById('timelineChart');
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+
+    ctx.clearRect(0, 0, width, height);
+
+    if (events.length === 0) {
+        ctx.fillStyle = '#666666';
+        ctx.font = '14px Inter';
+        ctx.textAlign = 'center';
+        ctx.fillText('No activity data yet', width / 2, height / 2);
+        return;
+    }
+
+    // Group events by hour/day based on period
+    const now = new Date();
+    const buckets = {};
+    const bucketSize = currentPeriod === 'daily' ? 3600000 : // 1 hour
+                       currentPeriod === 'weekly' ? 86400000 : // 1 day
+                       86400000 * 7; // 1 week
+
+    events.forEach(event => {
+        const bucketKey = Math.floor(event.timestamp.getTime() / bucketSize) * bucketSize;
+        if (!buckets[bucketKey]) {
+            buckets[bucketKey] = { views: 0, chats: 0, bookings: 0 };
+        }
+        if (event.action === 'view_item') buckets[bucketKey].views++;
+        if (event.action === 'open_chat') buckets[bucketKey].chats++;
+        if (event.action === 'request_booking') buckets[bucketKey].bookings++;
+    });
+
+    const sortedBuckets = Object.entries(buckets)
+        .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
+        .slice(-20); // Show last 20 buckets
+
+    if (sortedBuckets.length === 0) return;
+
+    const maxValue = Math.max(
+        ...sortedBuckets.map(([, data]) => Math.max(data.views, data.chats, data.bookings)),
+        1
+    );
+
+    const padding = { top: 20, right: 20, bottom: 40, left: 50 };
+    const chartWidth = width - padding.left - padding.right;
+    const chartHeight = height - padding.top - padding.bottom;
+    const barWidth = chartWidth / sortedBuckets.length / 3.5;
+
+    // Draw axes
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, padding.top);
+    ctx.lineTo(padding.left, height - padding.bottom);
+    ctx.lineTo(width - padding.right, height - padding.bottom);
+    ctx.stroke();
+
+    // Draw bars
+    sortedBuckets.forEach(([timestamp, data], index) => {
+        const x = padding.left + (index * chartWidth / sortedBuckets.length);
+        const drawBar = (value, offset, color) => {
+            const barHeight = (value / maxValue) * chartHeight;
+            ctx.fillStyle = color;
+            ctx.fillRect(
+                x + offset,
+                height - padding.bottom - barHeight,
+                barWidth,
+                barHeight
+            );
+        };
+
+        drawBar(data.views, 0, '#2d5a3d');
+        drawBar(data.chats, barWidth + 2, '#4ade80');
+        drawBar(data.bookings, (barWidth + 2) * 2, '#22c55e');
+    });
+
+    // Draw legend
+    const legends = [
+        { label: 'Views', color: '#2d5a3d' },
+        { label: 'Chats', color: '#4ade80' },
+        { label: 'Bookings', color: '#22c55e' }
+    ];
+
+    legends.forEach((legend, index) => {
+        const legendX = width - 150 + (index === 0 ? -100 : index === 1 ? -50 : 0);
+        ctx.fillStyle = legend.color;
+        ctx.fillRect(legendX, 10, 15, 15);
+        ctx.fillStyle = '#666666';
+        ctx.font = '12px Inter';
+        ctx.textAlign = 'left';
+        ctx.fillText(legend.label, legendX + 20, 22);
+    });
+
+    // Y-axis labels
+    ctx.fillStyle = '#666666';
+    ctx.font = '10px Inter';
+    ctx.textAlign = 'right';
+    for (let i = 0; i <= 5; i++) {
+        const value = Math.round((maxValue / 5) * i);
+        const y = height - padding.bottom - (chartHeight / 5) * i;
+        ctx.fillText(value.toString(), padding.left - 5, y + 3);
+    }
+}
+
+/**
+ * Render top items and categories lists
+ */
+function renderTopLists(events, itemsMap) {
+    // Top items by views
+    const itemViewCounts = {};
+    const categoryInterest = {};
+
+    events.forEach(event => {
+        if (event.action === 'view_item' && event.itemId) {
+            itemViewCounts[event.itemId] = (itemViewCounts[event.itemId] || 0) + 1;
+            const item = itemsMap[event.itemId];
+            if (item?.category) {
+                categoryInterest[item.category] = (categoryInterest[item.category] || 0) + 1;
+            }
+        }
+    });
+
+    const topItems = Object.entries(itemViewCounts)
+        .map(([itemId, count]) => ({ itemId, count, item: itemsMap[itemId] }))
+        .filter(entry => entry.item)
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5);
+
+    const topItemsList = document.getElementById('topItemsList');
+    if (topItems.length === 0) {
+        topItemsList.innerHTML = '<div class="empty-state"><p>No item views yet</p></div>';
+    } else {
+        topItemsList.innerHTML = topItems.map((entry, index) => `
+            <div class="top-list-item">
+                <span class="rank">#${index + 1}</span>
+                <span class="item-emoji">${entry.item.emoji || '📦'}</span>
+                <span class="item-name">${entry.item.name}</span>
+                <span class="item-count">${entry.count} views</span>
+            </div>
+        `).join('');
+    }
+
+    // Top categories
+    const topCategories = Object.entries(categoryInterest)
+        .map(([category, count]) => ({ category, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5);
+
+    const topCategoriesList = document.getElementById('topCategoriesList');
+    if (topCategories.length === 0) {
+        topCategoriesList.innerHTML = '<div class="empty-state"><p>No category data yet</p></div>';
+    } else {
+        topCategoriesList.innerHTML = topCategories.map((entry, index) => `
+            <div class="top-list-item">
+                <span class="rank">#${index + 1}</span>
+                <span class="item-emoji">${itemEmojis[entry.category] || '📦'}</span>
+                <span class="category-name">${entry.category}</span>
+                <span class="item-count">${entry.count} views</span>
+            </div>
+        `).join('');
+    }
+}
+
+/**
+ * Populate session selector with available sessions
+ */
+function populateSessionSelector(events) {
+    const sessionSelector = document.getElementById('sessionSelector');
+    if (!sessionSelector) return;
+
+    // Group events by scenarioId (from automated tests)
+    const sessions = {};
+    events.forEach(event => {
+        const sessionId = event.scenarioId || event.userId;
+        if (sessionId && event.action) {
+            if (!sessions[sessionId]) {
+                sessions[sessionId] = {
+                    id: sessionId,
+                    events: [],
+                    firstEvent: event.timestamp
+                };
+            }
+            sessions[sessionId].events.push(event);
+        }
+    });
+
+    // Sort by most recent
+    const sortedSessions = Object.values(sessions)
+        .sort((a, b) => b.firstEvent - a.firstEvent)
+        .slice(0, 20); // Show last 20 sessions
+
+    sessionSelector.innerHTML = '<option value="">Select a session...</option>' +
+        sortedSessions.map(session => {
+            const eventCount = session.events.length;
+            const timeStr = session.firstEvent.toLocaleString();
+            const label = session.id.startsWith('auto-')
+                ? `🤖 Automated Test - ${timeStr} (${eventCount} events)`
+                : `👤 User Session - ${timeStr} (${eventCount} events)`;
+            return `<option value="${session.id}">${label}</option>`;
+        }).join('');
+}
+
+/**
+ * Replay a session chronologically
+ */
+function replaySession(sessionId) {
+    if (!sessionId || !dashboardData) return;
+
+    const allEvents = dashboardData.events;
+    const sessionEvents = allEvents
+        .filter(e => (e.scenarioId || e.userId) === sessionId)
+        .sort((a, b) => a.timestamp - b.timestamp);
+
+    if (sessionEvents.length === 0) {
+        alert('No events found for this session');
+        return;
+    }
+
+    const replayLog = document.getElementById('replayLog');
+    const stopBtn = document.getElementById('stopReplayBtn');
+    const replayBtn = document.getElementById('replaySessionBtn');
+
+    replayLog.innerHTML = '';
+    replayBtn.disabled = true;
+    stopBtn.disabled = false;
+
+    let currentIndex = 0;
+
+    const playNextEvent = () => {
+        if (currentIndex >= sessionEvents.length) {
+            stopSessionReplay();
+            return;
+        }
+
+        const event = sessionEvents[currentIndex];
+        const logEntry = document.createElement('div');
+        logEntry.className = 'replay-event';
+
+        const timeStr = event.timestamp.toLocaleTimeString();
+        const actionName = event.action.replace(/_/g, ' ').toUpperCase();
+
+        let details = '';
+        if (event.itemName) details += ` - ${event.itemName}`;
+        if (event.searchQuery) details += ` - "${event.searchQuery}"`;
+
+        logEntry.innerHTML = `
+            <span class="replay-time">${timeStr}</span>
+            <span class="replay-action">${actionName}</span>
+            <span class="replay-details">${details}</span>
+        `;
+
+        replayLog.appendChild(logEntry);
+        replayLog.scrollTop = replayLog.scrollHeight;
+
+        currentIndex++;
+        replayInterval = setTimeout(playNextEvent, 800); // 800ms between events
+    };
+
+    playNextEvent();
+}
+
+/**
+ * Stop session replay
+ */
+function stopSessionReplay() {
+    if (replayInterval) {
+        clearTimeout(replayInterval);
+        replayInterval = null;
+    }
+
+    const replayBtn = document.getElementById('replaySessionBtn');
+    const stopBtn = document.getElementById('stopReplayBtn');
+
+    if (replayBtn) replayBtn.disabled = false;
+    if (stopBtn) stopBtn.disabled = true;
+}
+
+/**
+ * Detailed Session Playback Tool
+ * Provides timeline scrubbing, event jump navigation, and UI state simulation
+ */
+
+// Playback state
+let currentPlaybackSession = null;
+let currentPlaybackEvents = [];
+let playbackIndex = 0;
+let playbackInterval = null;
+let playbackSpeed = 1;
+let isPlaying = false;
+
+// Load all recorded sessions into selector
+async function loadRecordedSessions() {
+    const detailedSessionSelector = document.getElementById('detailedSessionSelector');
+    if (!detailedSessionSelector) return;
+
+    try {
+        const sessionsSnapshot = await getDocs(collection(db, 'sessions'));
+        detailedSessionSelector.innerHTML = '<option value="">Select a recorded session...</option>';
+
+        const sessions = [];
+        sessionsSnapshot.forEach((doc) => {
+            sessions.push({ id: doc.id, ...doc.data() });
+        });
+
+        // Sort by start time (most recent first)
+        sessions.sort((a, b) => {
+            const aTime = a.startTime?.toMillis() || 0;
+            const bTime = b.startTime?.toMillis() || 0;
+            return bTime - aTime;
+        });
+
+        sessions.forEach((session) => {
+            const option = document.createElement('option');
+            option.value = session.id;
+            const startTime = session.startTime ? new Date(session.startTime.toMillis()).toLocaleString() : 'Unknown';
+            const duration = session.duration ? `${(session.duration / 1000).toFixed(0)}s` : 'In progress';
+            option.textContent = `${session.userEmail} - ${startTime} (${duration})`;
+            detailedSessionSelector.appendChild(option);
+        });
+
+        document.getElementById('loadPlaybackBtn').disabled = false;
+    } catch (error) {
+        console.error('Error loading sessions:', error);
+    }
+}
+
+// Load selected session for playback
+async function loadSessionForPlayback() {
+    const detailedSessionSelector = document.getElementById('detailedSessionSelector');
+    const sessionId = detailedSessionSelector.value;
+
+    if (!sessionId) return;
+
+    try {
+        // Load session metadata
+        const sessionDoc = await getDoc(doc(db, 'sessions', sessionId));
+        if (!sessionDoc.exists()) {
+            alert('Session not found');
+            return;
+        }
+
+        currentPlaybackSession = { id: sessionDoc.id, ...sessionDoc.data() };
+
+        // Load all events for this session
+        const eventsSnapshot = await getDocs(
+            query(
+                collection(db, 'sessions', sessionId, 'events'),
+                orderBy('relativeTime', 'asc')
+            )
+        );
+
+        currentPlaybackEvents = [];
+        eventsSnapshot.forEach((doc) => {
+            currentPlaybackEvents.push({ id: doc.id, ...doc.data() });
+        });
+
+        // Reset playback state
+        playbackIndex = 0;
+        isPlaying = false;
+        playbackSpeed = 1;
+
+        // Show playback container
+        document.getElementById('playbackContainer').classList.remove('hidden');
+
+        // Update header info
+        const startTime = currentPlaybackSession.startTime
+            ? new Date(currentPlaybackSession.startTime.toMillis()).toLocaleString()
+            : 'Unknown';
+        const duration = currentPlaybackSession.duration
+            ? `${(currentPlaybackSession.duration / 1000).toFixed(1)}s`
+            : `${(currentPlaybackEvents[currentPlaybackEvents.length - 1]?.relativeTime / 1000).toFixed(1)}s`;
+
+        document.getElementById('playbackUser').textContent = `👤 ${currentPlaybackSession.userEmail}`;
+        document.getElementById('playbackDuration').textContent = `⏱️ Duration: ${duration}`;
+        document.getElementById('playbackEvents').textContent = `📊 ${currentPlaybackEvents.length} events`;
+
+        // Setup timeline
+        const timelineScrubber = document.getElementById('timelineScrubber');
+        timelineScrubber.max = currentPlaybackEvents.length - 1;
+        timelineScrubber.value = 0;
+
+        // Render events list and timeline markers
+        renderEventsList();
+        renderTimelineMarkers();
+
+        // Enable controls
+        document.getElementById('playBtn').disabled = false;
+        document.getElementById('pauseBtn').disabled = true;
+        document.getElementById('resetBtn').disabled = false;
+
+        // Reset UI state display
+        updateUIStateDisplay(null);
+
+    } catch (error) {
+        console.error('Error loading session for playback:', error);
+        alert('Error loading session. Please try again.');
+    }
+}
+
+// Render events list
+function renderEventsList() {
+    const eventsList = document.getElementById('eventsList');
+    eventsList.innerHTML = '';
+
+    currentPlaybackEvents.forEach((event, index) => {
+        const eventDiv = document.createElement('div');
+        eventDiv.className = 'event-item';
+        eventDiv.dataset.index = index;
+
+        const timeLabel = `${(event.relativeTime / 1000).toFixed(1)}s`;
+        const eventIcon = getEventIcon(event.type);
+        const eventDesc = getEventDescription(event);
+
+        eventDiv.innerHTML = `
+            <div class="event-time">${timeLabel}</div>
+            <div class="event-content">
+                <span class="event-icon">${eventIcon}</span>
+                <span class="event-desc">${eventDesc}</span>
+            </div>
+        `;
+
+        // Click to jump to event
+        eventDiv.addEventListener('click', () => {
+            jumpToEvent(index);
+        });
+
+        eventsList.appendChild(eventDiv);
+    });
+}
+
+// Render timeline markers
+function renderTimelineMarkers() {
+    const timelineMarkers = document.getElementById('timelineMarkers');
+    timelineMarkers.innerHTML = '';
+
+    const totalEvents = currentPlaybackEvents.length;
+    const maxDuration = currentPlaybackEvents[totalEvents - 1]?.relativeTime || 1;
+
+    currentPlaybackEvents.forEach((event, index) => {
+        const marker = document.createElement('div');
+        marker.className = `timeline-marker marker-${event.type}`;
+        const position = (event.relativeTime / maxDuration) * 100;
+        marker.style.left = `${position}%`;
+        marker.title = `${(event.relativeTime / 1000).toFixed(1)}s - ${event.type}`;
+
+        marker.addEventListener('click', () => {
+            jumpToEvent(index);
+        });
+
+        timelineMarkers.appendChild(marker);
+    });
+}
+
+// Get icon for event type
+function getEventIcon(type) {
+    const icons = {
+        'view': '📄',
+        'scroll': '🖱️',
+        'click': '👆',
+        'search': '🔍',
+        'item_view': '👁️',
+        'chat_open': '💬',
+        'booking': '📅',
+        'navigation': '🧭'
+    };
+    return icons[type] || '📌';
+}
+
+// Get event description
+function getEventDescription(event) {
+    switch (event.type) {
+        case 'view':
+            return `Navigated to ${event.data?.viewId || 'unknown view'}`;
+        case 'scroll':
+            return `Scrolled to (${event.data?.scrollX}, ${event.data?.scrollY})`;
+        case 'click':
+            return `Clicked ${event.data?.elementType || 'element'}${event.data?.elementId ? ` #${event.data.elementId}` : ''}`;
+        case 'search':
+            return `Searched: "${event.data?.query}"`;
+        case 'item_view':
+            return `Viewed item: ${event.data?.itemName}`;
+        case 'chat_open':
+            return `Opened chat for: ${event.data?.itemName}`;
+        case 'booking':
+            return `Requested booking for: ${event.data?.itemName}`;
+        default:
+            return `${event.type}`;
+    }
+}
+
+// Update UI state display
+function updateUIStateDisplay(event) {
+    const stateView = document.getElementById('stateView');
+    const stateScroll = document.getElementById('stateScroll');
+    const stateItem = document.getElementById('stateItem');
+    const stateSearch = document.getElementById('stateSearch');
+    const stateChat = document.getElementById('stateChat');
+
+    if (!event) {
+        stateView.textContent = '-';
+        stateScroll.textContent = '-';
+        stateItem.textContent = '-';
+        stateSearch.textContent = '-';
+        stateChat.textContent = '-';
+        return;
+    }
+
+    // Update based on event type
+    if (event.type === 'view') {
+        stateView.textContent = event.data?.viewId || '-';
+    } else if (event.type === 'scroll') {
+        stateScroll.textContent = `X: ${event.data?.scrollX || 0}, Y: ${event.data?.scrollY || 0}`;
+    } else if (event.type === 'item_view') {
+        stateItem.textContent = event.data?.itemName || '-';
+    } else if (event.type === 'search') {
+        stateSearch.textContent = event.data?.query || '-';
+    } else if (event.type === 'chat_open') {
+        stateChat.textContent = event.data?.itemName || '-';
+    } else if (event.type === 'booking') {
+        stateItem.textContent = `${event.data?.itemName} (Booking: ${event.data?.startDate} - ${event.data?.endDate})`;
+    }
+}
+
+// Jump to specific event
+function jumpToEvent(index) {
+    playbackIndex = index;
+    updatePlaybackPosition();
+    highlightCurrentEvent();
+    updateUIStateDisplay(currentPlaybackEvents[index]);
+}
+
+// Update playback position (scrubber and progress)
+function updatePlaybackPosition() {
+    const timelineScrubber = document.getElementById('timelineScrubber');
+    const timelineProgress = document.getElementById('timelineProgress');
+
+    timelineScrubber.value = playbackIndex;
+    const progressPercent = (playbackIndex / (currentPlaybackEvents.length - 1)) * 100;
+    timelineProgress.style.width = `${progressPercent}%`;
+}
+
+// Highlight current event in list
+function highlightCurrentEvent() {
+    document.querySelectorAll('.event-item').forEach((item, index) => {
+        if (index === playbackIndex) {
+            item.classList.add('active');
+            item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } else {
+            item.classList.remove('active');
+        }
+    });
+}
+
+// Play session
+function playSession() {
+    isPlaying = true;
+    document.getElementById('playBtn').disabled = true;
+    document.getElementById('pauseBtn').disabled = false;
+
+    function playNextEvent() {
+        if (!isPlaying || playbackIndex >= currentPlaybackEvents.length - 1) {
+            pauseSession();
+            return;
+        }
+
+        const currentEvent = currentPlaybackEvents[playbackIndex];
+        const nextEvent = currentPlaybackEvents[playbackIndex + 1];
+
+        // Calculate delay to next event (adjusted by playback speed)
+        const delay = (nextEvent.relativeTime - currentEvent.relativeTime) / playbackSpeed;
+
+        playbackInterval = setTimeout(() => {
+            playbackIndex++;
+            updatePlaybackPosition();
+            highlightCurrentEvent();
+            updateUIStateDisplay(currentPlaybackEvents[playbackIndex]);
+            playNextEvent();
+        }, delay);
+    }
+
+    playNextEvent();
+}
+
+// Pause session
+function pauseSession() {
+    isPlaying = false;
+    if (playbackInterval) {
+        clearTimeout(playbackInterval);
+        playbackInterval = null;
+    }
+    document.getElementById('playBtn').disabled = false;
+    document.getElementById('pauseBtn').disabled = true;
+}
+
+// Reset session
+function resetSession() {
+    pauseSession();
+    playbackIndex = 0;
+    updatePlaybackPosition();
+    highlightCurrentEvent();
+    updateUIStateDisplay(null);
+}
+
+// Setup playback controls
+function setupPlaybackControls() {
+    const detailedSessionSelector = document.getElementById('detailedSessionSelector');
+    const loadPlaybackBtn = document.getElementById('loadPlaybackBtn');
+    const playBtn = document.getElementById('playBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const timelineScrubber = document.getElementById('timelineScrubber');
+
+    if (!detailedSessionSelector || !loadPlaybackBtn) return;
+
+    // Load sessions on dashboard load
+    loadRecordedSessions();
+
+    // Enable load button when session selected
+    detailedSessionSelector.addEventListener('change', () => {
+        loadPlaybackBtn.disabled = !detailedSessionSelector.value;
+    });
+
+    // Load session button
+    loadPlaybackBtn.addEventListener('click', loadSessionForPlayback);
+
+    // Playback controls
+    if (playBtn) playBtn.addEventListener('click', playSession);
+    if (pauseBtn) pauseBtn.addEventListener('click', pauseSession);
+    if (resetBtn) resetBtn.addEventListener('click', resetSession);
+
+    // Timeline scrubber
+    if (timelineScrubber) {
+        timelineScrubber.addEventListener('input', (e) => {
+            pauseSession();
+            playbackIndex = parseInt(e.target.value);
+            updatePlaybackPosition();
+            highlightCurrentEvent();
+            updateUIStateDisplay(currentPlaybackEvents[playbackIndex]);
+        });
+    }
+
+    // Speed controls
+    document.querySelectorAll('.speed-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+            e.target.classList.add('active');
+            playbackSpeed = parseFloat(e.target.dataset.speed);
+        });
+    });
+}
+
 // Search items
 async function searchItems() {
     const query = document.getElementById('searchInput').value.toLowerCase();
+
+    // Log search analytics
+    if (query) {
+        await logAnalytics('search', null, {
+            searchQuery: query
+        });
+
+        // Track search in session recording
+        if (currentSessionId) {
+            trackSearch(query);
+        }
+    }
 
     try {
         const itemsSnapshot = await getDocs(collection(db, 'items'));
@@ -375,17 +3148,22 @@ async function searchItems() {
         });
 
         if (!query) {
-            renderItems(allItems);
+            // No search query - rank by popularity and availability
+            const rankedItems = rankItems(allItems, '');
+            renderItems(rankedItems);
             return;
         }
 
+        // Filter items that match the search query
         const filtered = allItems.filter(item =>
             item.name.toLowerCase().includes(query) ||
             item.description.toLowerCase().includes(query) ||
             item.category.toLowerCase().includes(query)
         );
 
-        renderItems(filtered);
+        // Rank filtered items
+        const rankedItems = rankItems(filtered, query);
+        renderItems(rankedItems);
     } catch (error) {
         console.error('Error searching items:', error);
     }
@@ -410,14 +3188,59 @@ function setupEventListeners() {
         loadMyItems();
         showView('myItemsView');
     });
+    document.getElementById('myBookingsBtn').addEventListener('click', () => {
+        loadMyBookings();
+        showView('myBookingsView');
+    });
+    document.getElementById('ownerBookingsBtn').addEventListener('click', () => {
+        loadOwnerBookings();
+        showView('bookingRequestsView');
+    });
+    document.getElementById('preferencesBtn').addEventListener('click', openPreferencesModal);
+    document.getElementById('testingDashboardBtn').addEventListener('click', () => {
+        loadTestingDashboard();
+    });
+    const runAutoTestBtn = document.getElementById('runAutoTestBtn');
+    if (runAutoTestBtn) {
+        runAutoTestBtn.addEventListener('click', runAutomatedUserTest);
+    }
+    document.getElementById('ownerTabPending').addEventListener('click', () => setOwnerBookingsTab('pending'));
+    document.getElementById('ownerTabConfirmed').addEventListener('click', () => setOwnerBookingsTab('accepted'));
+    document.getElementById('ownerTabDeclined').addEventListener('click', () => setOwnerBookingsTab('declined'));
+    document.getElementById('ownerTabHistory').addEventListener('click', () => setOwnerBookingsTab('archived'));
+    ['weightPrice', 'weightCategory', 'weightAvailability', 'weightUrgency'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('input', updatePreferencesPreview);
+        }
+    });
+
+    // My Chats navigation
+    document.getElementById('myChatsBtn').addEventListener('click', loadMyChats);
 
     // Back buttons
     document.getElementById('backFromDetailBtn').addEventListener('click', () => showView('homeView'));
     document.getElementById('backFromCreateBtn').addEventListener('click', () => showView('homeView'));
     document.getElementById('backFromMyItemsBtn').addEventListener('click', () => showView('homeView'));
+    document.getElementById('backFromMyChatsBtn').addEventListener('click', () => showView('homeView'));
+    document.getElementById('backFromMyBookingsBtn').addEventListener('click', () => showView('homeView'));
+    document.getElementById('backFromBookingRequestsBtn').addEventListener('click', () => showView('homeView'));
+    document.getElementById('backFromTestingDashboardBtn').addEventListener('click', () => showView('homeView'));
     document.getElementById('backFromChatBtn').addEventListener('click', () => {
+        // Clear typing indicator when leaving chat
+        if (currentChatId) {
+            setTypingIndicator(currentChatId, false);
+            if (typingTimeout) {
+                clearTimeout(typingTimeout);
+                typingTimeout = null;
+            }
+        }
+        // Unsubscribe from listeners
         if (unsubscribeMessages) {
             unsubscribeMessages();
+        }
+        if (unsubscribeTypingIndicator) {
+            unsubscribeTypingIndicator();
         }
         if (currentItemId) {
             showItemDetail(currentItemId);
@@ -435,11 +3258,50 @@ function setupEventListeners() {
     // Create listing form
     document.getElementById('createListingForm').addEventListener('submit', createListing);
 
+    // Booking modal
+    document.getElementById('bookingForm').addEventListener('submit', submitBookingRequest);
+    document.getElementById('cancelBookingBtn').addEventListener('click', closeBookingModal);
+
+    // Close modal when clicking outside
+    document.getElementById('bookingModal').addEventListener('click', (e) => {
+        if (e.target.id === 'bookingModal') {
+            closeBookingModal();
+        }
+    });
+
+    // Preferences modal
+    document.getElementById('preferencesForm').addEventListener('submit', savePreferences);
+    document.getElementById('cancelPreferencesBtn').addEventListener('click', closePreferencesModal);
+    document.getElementById('preferencesModal').addEventListener('click', (e) => {
+        if (e.target.id === 'preferencesModal') {
+            closePreferencesModal();
+        }
+    });
+
+    // Test listings panel
+    document.getElementById('generateTestListingsBtn').addEventListener('click', openTestListingsModal);
+    document.getElementById('generateFakeListingsBtn').addEventListener('click', generateFakeListings);
+    document.getElementById('clearMyListingsBtn').addEventListener('click', clearMyListings);
+    document.getElementById('closeTestModalBtn').addEventListener('click', closeTestListingsModal);
+
+    // Close test modal when clicking outside
+    document.getElementById('testListingsModal').addEventListener('click', (e) => {
+        if (e.target.id === 'testListingsModal') {
+            closeTestListingsModal();
+        }
+    });
+
     // Chat
     document.getElementById('sendMessageBtn').addEventListener('click', sendMessage);
-    document.getElementById('chatInput').addEventListener('keyup', (e) => {
-        if (e.key === 'Enter') sendMessage();
+    const chatInput = document.getElementById('chatInput');
+    chatInput.addEventListener('keyup', (e) => {
+        if (e.key === 'Enter') {
+            sendMessage();
+        } else {
+            handleChatTyping();
+        }
     });
+    chatInput.addEventListener('input', handleChatTyping);
 
     // Logout
     document.getElementById('logoutBtn').addEventListener('click', handleLogout);

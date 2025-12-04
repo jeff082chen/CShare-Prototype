@@ -3,12 +3,12 @@
 // Get this from Firebase Console > Project Settings > General > Your apps
 
 const firebaseConfig = {
-    apiKey: "AIzaSyAcbJCua9vbqd3IdMpqy0flCyU8X4uFy44",
-    authDomain: "cshare-cornell.firebaseapp.com",
-    projectId: "cshare-cornell",
-    storageBucket: "cshare-cornell.firebasestorage.app",
-    messagingSenderId: "314001056592",
-    appId: "1:314001056592:web:98705bdfe613e4cf0d8255"
+  apiKey: "AIzaSyDPdrPXwYv6BS7MW5qEHSK_kj2wacCflBQ",
+  authDomain: "cshare-cornell-b7fc9.firebaseapp.com",
+  projectId: "cshare-cornell-b7fc9",
+  storageBucket: "cshare-cornell-b7fc9.firebasestorage.app",
+  messagingSenderId: "857842598502",
+  appId: "1:857842598502:web:69e9fba13533b9eb7fe3a7"
 };
 
 /*

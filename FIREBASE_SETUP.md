@@ -69,10 +69,17 @@ service cloud.firestore {
 
     match /items/{itemId} {
       allow read: if isEduUser();
+      
       allow create: if isEduUser() && 
                         request.resource.data.ownerId == request.auth.uid;
-      allow update, delete: if isEduUser() && 
-                               resource.data.ownerId == request.auth.uid;
+      
+      allow update: if isEduUser() && (
+        resource.data.ownerId == request.auth.uid ||
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views']))
+      );
+
+      allow delete: if isEduUser() && 
+                       resource.data.ownerId == request.auth.uid;
     }
 
     match /chats/{chatId} {
@@ -83,9 +90,7 @@ service cloud.firestore {
     }
 
     match /bookings/{bookingId} {
-      allow read: if isEduUser() && 
-        (request.auth.uid == resource.data.ownerId || 
-         request.auth.uid == resource.data.renterId);
+      allow read: if isEduUser();
          
       allow create: if isEduUser() &&
         request.resource.data.renterId == request.auth.uid &&
@@ -97,10 +102,10 @@ service cloud.firestore {
         (request.resource.data.ownerId == resource.data.ownerId || request.resource.data.renterId == resource.data.renterId); 
     }
 
-    match /bookingLocks/{lockId} {
+		match /bookingLocks/{lockId} {
       allow read: if isEduUser();
-      allow create: if isEduUser() && !exists(resource);
-      allow update, delete: if false;
+      allow create: if isEduUser();
+      allow update, delete: if false; 
     }
 
     match /analytics/{docId} {

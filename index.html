@@ -39,6 +39,15 @@
             <div class="action-buttons">
                 <button class="btn-primary" id="createListingBtn">+ List an Item</button>
                 <button class="btn-secondary" id="myItemsBtn">My Items</button>
+                <button class="btn-secondary" id="myChatsBtn">💬 My Chats</button>
+                <button class="btn-secondary" id="myBookingsBtn">My Bookings</button>
+                <button class="btn-secondary" id="ownerBookingsBtn">Owner Bookings</button>
+                <button class="btn-secondary" id="preferencesBtn">Preferences</button>
+                <button class="btn-secondary" id="testingDashboardBtn">📊 Testing Dashboard</button>
+            </div>
+
+            <div class="test-controls">
+                <button class="btn-test" id="generateTestListingsBtn">🧪 Generate Test Listings</button>
             </div>
 
             <div class="items-grid" id="itemsGrid">
@@ -82,6 +91,16 @@
                         <label for="itemPrice">Daily Rate (leave 0 for free)</label>
                         <input type="number" id="itemPrice" min="0" step="0.01" value="0" required>
                     </div>
+                    <div class="form-group">
+                        <label for="availableFrom">Available From (optional)</label>
+                        <input type="date" id="availableFrom">
+                        <small class="form-hint">Leave empty if available immediately</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="availableUntil">Available Until (optional)</label>
+                        <input type="date" id="availableUntil">
+                        <small class="form-hint">Leave empty if no end date</small>
+                    </div>
                     <button type="submit" class="btn-primary">Create Listing</button>
                 </form>
             </div>
@@ -98,6 +117,41 @@
             </div>
         </div>
 
+        <!-- My Bookings View -->
+        <div id="myBookingsView" class="view">
+            <button class="btn-back" id="backFromMyBookingsBtn">← Back</button>
+            <div class="booking-requests-container">
+                <h2>My Bookings</h2>
+                <div class="dashboard-section">
+                    <h3>Pending</h3>
+                    <div id="myBookingsPending"></div>
+                </div>
+                <div class="dashboard-section">
+                    <h3>Accepted</h3>
+                    <div id="myBookingsConfirmed"></div>
+                </div>
+                <div class="dashboard-section">
+                    <h3>Declined</h3>
+                    <div id="myBookingsDeclined"></div>
+                </div>
+                <div class="dashboard-section">
+                    <h3>Archived</h3>
+                    <div id="myBookingsArchived"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- My Chats View -->
+        <div id="myChatsView" class="view">
+            <button class="btn-back" id="backFromMyChatsBtn">← Back</button>
+            <div class="my-chats-container">
+                <h2>💬 My Chats</h2>
+                <div id="chatsList" class="chats-list">
+                    <!-- Chat list will be dynamically inserted here -->
+                </div>
+            </div>
+        </div>
+
         <!-- Chat View -->
         <div id="chatView" class="view">
             <button class="btn-back" id="backFromChatBtn">← Back</button>
@@ -108,15 +162,312 @@
                 <div class="chat-messages" id="chatMessages">
                     <!-- Messages will be dynamically inserted here -->
                 </div>
+                <div id="typingIndicatorContainer" style="display: none;"></div>
                 <div class="chat-input-container">
                     <input type="text" id="chatInput" placeholder="Type a message...">
                     <button class="btn-primary" id="sendMessageBtn">Send</button>
                 </div>
             </div>
         </div>
+
+        <!-- Booking Requests View -->
+        <div id="bookingRequestsView" class="view">
+            <button class="btn-back" id="backFromBookingRequestsBtn">← Back</button>
+            <div class="booking-requests-container">
+                <h2>Owner Booking Management</h2>
+                <div class="tab-buttons">
+                    <button class="tab-btn active" id="ownerTabPending" data-target="ownerPending">Pending</button>
+                    <button class="tab-btn" id="ownerTabConfirmed" data-target="ownerConfirmed">Accepted</button>
+                    <button class="tab-btn" id="ownerTabDeclined" data-target="ownerDeclined">Declined</button>
+                    <button class="tab-btn" id="ownerTabHistory" data-target="ownerHistory">Archived</button>
+                </div>
+                <div class="tab-content" id="ownerPending"></div>
+                <div class="tab-content hidden" id="ownerConfirmed"></div>
+                <div class="tab-content hidden" id="ownerDeclined"></div>
+                <div class="tab-content hidden" id="ownerHistory"></div>
+            </div>
+        </div>
+
+        <!-- Testing Dashboard View -->
+        <div id="testingDashboardView" class="view">
+            <button class="btn-back" id="backFromTestingDashboardBtn">← Back</button>
+            <div class="dashboard-container">
+                <h2>📊 Advanced Testing Dashboard</h2>
+                <p class="dashboard-subtitle">Real-time analytics with user funnels, charts, and session replay</p>
+
+                <!-- Time Period Toggle -->
+                <div class="dashboard-section">
+                    <div class="period-toggle">
+                        <button class="period-btn active" data-period="daily">Daily</button>
+                        <button class="period-btn" data-period="weekly">Weekly</button>
+                        <button class="period-btn" data-period="monthly">Monthly</button>
+                    </div>
+                </div>
+
+                <!-- Automated Testing -->
+                <div class="dashboard-section">
+                    <h3>🧪 Automated User Testing</h3>
+                    <p class="dashboard-subtitle">Simulate complete user journeys and log analytics</p>
+                    <div class="auto-test-controls">
+                        <button class="btn-primary" id="runAutoTestBtn">Run Automated Test</button>
+                        <span id="autoTestStatus" class="auto-test-status">Idle</span>
+                    </div>
+                    <div class="auto-test-log" id="autoTestLog"></div>
+                </div>
+
+                <!-- Conversion Funnel -->
+                <div class="dashboard-section">
+                    <h3>🔄 User Conversion Funnel</h3>
+                    <p class="dashboard-subtitle">Track user journey from view to booking acceptance</p>
+                    <canvas id="funnelChart" width="800" height="400"></canvas>
+                    <div id="funnelStats" class="funnel-stats"></div>
+                </div>
+
+                <!-- Drop-off Analysis -->
+                <div class="dashboard-section">
+                    <h3>⚠️ Top Failing Steps (Drop-off Analysis)</h3>
+                    <div id="dropoffAnalysis" class="dropoff-container"></div>
+                </div>
+
+                <!-- Metrics Over Time Chart -->
+                <div class="dashboard-section">
+                    <h3>📈 Activity Over Time</h3>
+                    <canvas id="timelineChart" width="800" height="300"></canvas>
+                </div>
+
+                <!-- Quick Stats -->
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <h3>Total Views</h3>
+                        <div class="metric-value" id="metricViews">0</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Chats Opened</h3>
+                        <div class="metric-value" id="metricChats">0</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Booking Requests</h3>
+                        <div class="metric-value" id="metricBookings">0</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Accepted Bookings</h3>
+                        <div class="metric-value" id="metricAccepted">0</div>
+                    </div>
+                    <div class="metric-card highlight">
+                        <h3>Conversion Rate</h3>
+                        <div class="metric-value" id="metricConversion">0%</div>
+                        <p class="metric-subtitle">(Bookings / Views)</p>
+                    </div>
+                </div>
+
+                <!-- Session Replay -->
+                <div class="dashboard-section">
+                    <h3>🎬 Session Replay</h3>
+                    <p class="dashboard-subtitle">Replay user sessions chronologically</p>
+                    <div id="sessionReplayControls" class="replay-controls">
+                        <select id="sessionSelector" class="session-selector">
+                            <option value="">Select a session...</option>
+                        </select>
+                        <button class="btn-primary" id="replaySessionBtn" disabled>▶️ Replay Session</button>
+                        <button class="btn-secondary" id="stopReplayBtn" disabled>⏹️ Stop</button>
+                    </div>
+                    <div id="replayLog" class="replay-log"></div>
+                </div>
+
+                <!-- Detailed Session Playback Tool -->
+                <div class="dashboard-section">
+                    <h3>🎥 Detailed Session Playback</h3>
+                    <p class="dashboard-subtitle">Replay user sessions with timeline scrubbing and event navigation</p>
+                    <div class="playback-controls">
+                        <select id="detailedSessionSelector" class="session-selector">
+                            <option value="">Select a recorded session...</option>
+                        </select>
+                        <button class="btn-primary" id="loadPlaybackBtn" disabled>Load Session</button>
+                    </div>
+                    <div id="playbackContainer" class="playback-container hidden">
+                        <div class="playback-header">
+                            <div class="playback-info">
+                                <span id="playbackUser"></span>
+                                <span id="playbackDuration"></span>
+                                <span id="playbackEvents"></span>
+                            </div>
+                            <div class="playback-speed">
+                                <label>Speed:</label>
+                                <button class="speed-btn active" data-speed="1">1x</button>
+                                <button class="speed-btn" data-speed="2">2x</button>
+                                <button class="speed-btn" data-speed="4">4x</button>
+                            </div>
+                        </div>
+                        <div class="timeline-container">
+                            <div class="timeline-scrubber">
+                                <div id="timelineProgress" class="timeline-progress"></div>
+                                <input type="range" id="timelineScrubber" class="timeline-slider" min="0" max="100" value="0">
+                            </div>
+                            <div class="timeline-markers" id="timelineMarkers"></div>
+                        </div>
+                        <div class="playback-buttons">
+                            <button class="btn-primary" id="playBtn">▶️ Play</button>
+                            <button class="btn-secondary" id="pauseBtn" disabled>⏸️ Pause</button>
+                            <button class="btn-secondary" id="resetBtn">⏮️ Reset</button>
+                        </div>
+                        <div class="playback-display">
+                            <div class="events-panel">
+                                <h4>📋 Event Timeline</h4>
+                                <div id="eventsList" class="events-list"></div>
+                            </div>
+                            <div class="state-panel">
+                                <h4>🖼️ UI State Simulation</h4>
+                                <div id="uiStateDisplay" class="ui-state-display">
+                                    <div class="state-info">
+                                        <div class="state-row">
+                                            <span class="state-label">Current View:</span>
+                                            <span id="stateView" class="state-value">-</span>
+                                        </div>
+                                        <div class="state-row">
+                                            <span class="state-label">Scroll Position:</span>
+                                            <span id="stateScroll" class="state-value">-</span>
+                                        </div>
+                                        <div class="state-row">
+                                            <span class="state-label">Current Item:</span>
+                                            <span id="stateItem" class="state-value">-</span>
+                                        </div>
+                                        <div class="state-row">
+                                            <span class="state-label">Last Search:</span>
+                                            <span id="stateSearch" class="state-value">-</span>
+                                        </div>
+                                        <div class="state-row">
+                                            <span class="state-label">Active Chat:</span>
+                                            <span id="stateChat" class="state-value">-</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Top Items & Categories -->
+                <div class="dashboard-grid">
+                    <div class="dashboard-section">
+                        <h3>🏆 Top 5 Most Viewed Items</h3>
+                        <div id="topItemsList" class="top-list"></div>
+                    </div>
+                    <div class="dashboard-section">
+                        <h3>📁 Top 5 Categories</h3>
+                        <div id="topCategoriesList" class="top-list"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
+    <!-- Booking Modal -->
+    <div id="bookingModal" class="modal">
+        <div class="modal-content">
+            <h3>Request to Book</h3>
+            <form id="bookingForm">
+                <div class="form-group">
+                    <label for="bookingStartDate">Start Date</label>
+                    <input type="date" id="bookingStartDate" required>
+                </div>
+                <div class="form-group">
+                    <label for="bookingEndDate">End Date</label>
+                    <input type="date" id="bookingEndDate" required>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" id="cancelBookingBtn">Cancel</button>
+                    <button type="submit" class="btn-primary">Submit Request</button>
+                </div>
+            </form>
+        </div>
+    </div>
 
+    <!-- Preferences Modal -->
+    <div id="preferencesModal" class="modal">
+        <div class="modal-content">
+            <h3>User Preferences</h3>
+            <form id="preferencesForm">
+                <div class="form-group">
+                    <label>Preferred Categories</label>
+                    <div class="checkbox-group">
+                        <label><input type="checkbox" name="prefCategory" value="Appliances"> Appliances</label>
+                        <label><input type="checkbox" name="prefCategory" value="Electronics"> Electronics</label>
+                        <label><input type="checkbox" name="prefCategory" value="Furniture"> Furniture</label>
+                        <label><input type="checkbox" name="prefCategory" value="Kitchen"> Kitchen</label>
+                        <label><input type="checkbox" name="prefCategory" value="Other"> Other</label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="slider-label">
+                        💰 Price sensitivity
+                        <span id="weightPriceValue" class="slider-value">3</span>
+                    </label>
+                    <input type="range" id="weightPrice" min="0" max="5" step="1" value="3">
+                    <div class="slider-hint">0 = Off | 3 = Medium | 5 = Very High</div>
+                </div>
+                <div class="form-group">
+                    <label class="slider-label">
+                        📁 Category importance
+                        <span id="weightCategoryValue" class="slider-value">3</span>
+                    </label>
+                    <input type="range" id="weightCategory" min="0" max="5" step="1" value="3">
+                    <div class="slider-hint">0 = Off | 3 = Medium | 5 = Very High</div>
+                </div>
+                <div class="form-group">
+                    <label class="slider-label">
+                        📅 Availability flexibility
+                        <span id="weightAvailabilityValue" class="slider-value">3</span>
+                    </label>
+                    <input type="range" id="weightAvailability" min="0" max="5" step="1" value="3">
+                    <div class="slider-hint">0 = Off | 3 = Medium | 5 = Very High</div>
+                </div>
+                <div class="form-group">
+                    <label class="slider-label">
+                        ⚡ Urgency sensitivity
+                        <span id="weightUrgencyValue" class="slider-value">3</span>
+                    </label>
+                    <input type="range" id="weightUrgency" min="0" max="5" step="1" value="3">
+                    <div class="slider-hint">0 = Off | 3 = Medium | 5 = Very High</div>
+                </div>
+                <div class="form-group preview-box">
+                    <label>📊 Live Preference Preview</label>
+                    <div id="preferencesPreviewText" class="preview-text">Price: Medium | Category: Medium | Availability: Medium | Urgency: Medium</div>
+                </div>
+                <div class="form-group">
+                    <label for="preferencesMaxPrice">Max Price</label>
+                    <input type="number" id="preferencesMaxPrice" min="0" step="0.01" placeholder="No limit">
+                </div>
+                <div class="form-group">
+                    <label for="preferencesDateFrom">Soonest Needed Date (optional)</label>
+                    <input type="date" id="preferencesDateFrom">
+                </div>
+                <div class="form-group">
+                    <label for="preferencesDateTo">Latest Needed Date (optional)</label>
+                    <input type="date" id="preferencesDateTo">
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" id="cancelPreferencesBtn">Cancel</button>
+                    <button type="submit" class="btn-primary">Save Preferences</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Test Listings Modal -->
+    <div id="testListingsModal" class="modal">
+        <div class="modal-content">
+            <h3>Test Data Management</h3>
+            <p>Generate or clear test listings for demo purposes</p>
+            <div class="test-actions">
+                <button class="btn-primary" id="generateFakeListingsBtn">🎲 Generate 10 Fake Listings</button>
+                <button class="btn-danger" id="clearMyListingsBtn">🗑️ Clear All My Listings</button>
+                <button class="btn-secondary" id="closeTestModalBtn">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Load environment configuration before app.js -->
+    <script src="env.js"></script>
     <script type="module" src="app.js"></script>
 
 </body>

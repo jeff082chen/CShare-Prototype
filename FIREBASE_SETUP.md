@@ -27,49 +27,93 @@
 ## Step 4: Set Up Security Rules
 
 ### Firestore Rules
-Replace the default rules with this:
+Replace the default rules with this (supports booking locks to prevent overlapping requests and enforces status transitions):
 
 ```javascript
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Helper function to check .edu email
+
     function isEduUser() {
       return request.auth != null && 
              request.auth.token.email.matches(".*\\.edu$");
     }
-    
-    // Users collection
+
+    function validDates() {
+      return request.resource.data.startDate is timestamp &&
+             request.resource.data.endDate is timestamp &&
+             request.resource.data.startDate < request.resource.data.endDate;
+    }
+
+    function lockIdsValid() {
+      return request.resource.data.lockIds is list && 
+             request.resource.data.lockIds.size() > 0;
+    }
+
+    function statusTransition() {
+      return resource == null ? request.resource.data.status == "pending"
+        : (resource.data.status == "pending" && 
+            request.resource.data.status in ["accepted","declined"])
+        || (resource.data.status in ["accepted","declined"] && 
+            request.resource.data.status == "archived");
+    }
+
     match /users/{userId} {
       allow read: if isEduUser();
       allow write: if isEduUser() && request.auth.uid == userId;
+      
+      match /preferences/{prefId} {
+        allow read, write: if isEduUser() && request.auth.uid == userId;
+      }
     }
-    
-    // Items collection
+
     match /items/{itemId} {
       allow read: if isEduUser();
       allow create: if isEduUser() && 
-                       request.resource.data.ownerId == request.auth.uid;
+                        request.resource.data.ownerId == request.auth.uid;
       allow update, delete: if isEduUser() && 
                                resource.data.ownerId == request.auth.uid;
     }
-    
-    // Messages collection
-    match /messages/{messageId} {
-      allow read: if isEduUser();
-      allow create: if isEduUser() && 
-                       request.resource.data.senderId == request.auth.uid;
-    }
-    
-    // Chats collection (for organizing messages)
+
     match /chats/{chatId} {
-      allow read: if isEduUser();
-      allow write: if isEduUser();
-      
+      allow read, write: if isEduUser();
       match /messages/{messageId} {
-        allow read: if isEduUser();
-        allow create: if isEduUser();
+        allow read, create: if isEduUser();
+      }
+    }
+
+    match /bookings/{bookingId} {
+      allow read: if isEduUser() && 
+        (request.auth.uid == resource.data.ownerId || 
+         request.auth.uid == resource.data.renterId);
+         
+      allow create: if isEduUser() &&
+        request.resource.data.renterId == request.auth.uid &&
+        request.resource.data.ownerId != request.auth.uid &&
+        request.resource.data.status == "pending" &&
+        validDates();
+
+      allow update: if isEduUser() && 
+        (request.resource.data.ownerId == resource.data.ownerId || request.resource.data.renterId == resource.data.renterId); 
+    }
+
+    match /bookingLocks/{lockId} {
+      allow read: if isEduUser();
+      allow create: if isEduUser() && !exists(resource);
+      allow update, delete: if false;
+    }
+
+    match /analytics/{docId} {
+      allow read: if isEduUser();
+      allow create: if isEduUser();
+    }
+
+    match /sessions/{sessionId} {
+      allow read: if isEduUser();
+      allow create, update: if isEduUser();
+      
+      match /events/{eventId} {
+        allow read, create: if isEduUser();
       }
     }
   }
@@ -86,7 +130,6 @@ Click "Publish" to save the rules.
 4. Click the web icon (`</>`) to add a web app
 5. Register app with nickname: "CShare Web"
 6. Copy the `firebaseConfig` object
-7. Paste it into `firebase-config.js` and `login.html`
 
 Your config will look like:
 ```javascript
@@ -100,11 +143,53 @@ const firebaseConfig = {
 };
 ```
 
-## Step 6: Update Configuration Files
+## Step 6: Configure Environment Variables
 
-Replace the placeholder config in these files:
-- `login.html` (line ~202)
-- `firebase-config.js` (line 5)
+**IMPORTANT**: We use environment variables to keep your Firebase credentials secure and prevent them from being committed to GitHub.
+
+### Option 1: Create `env.js` file (Recommended for local development)
+
+1. Copy the example file:
+   ```bash
+   cp env.js.example env.js
+   ```
+
+2. Open `env.js` and replace the placeholder values with your Firebase config:
+   ```javascript
+   window.ENV = {
+     VITE_FIREBASE_API_KEY: "your-actual-api-key",
+     VITE_FIREBASE_AUTH_DOMAIN: "your-project.firebaseapp.com",
+     VITE_FIREBASE_PROJECT_ID: "your-project-id",
+     VITE_FIREBASE_STORAGE_BUCKET: "your-project.appspot.com",
+     VITE_FIREBASE_MESSAGING_SENDER_ID: "123456789",
+     VITE_FIREBASE_APP_ID: "1:123456789:web:abcdef"
+   };
+   ```
+
+3. The `env.js` file is already in `.gitignore` so it won't be committed to GitHub
+
+### Option 2: Use `.env` file (For build tools like Vite)
+
+If you're using a build tool like Vite:
+
+1. Copy the example file:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Edit `.env` and fill in your Firebase credentials:
+   ```
+   VITE_FIREBASE_API_KEY=your-actual-api-key
+   VITE_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
+   VITE_FIREBASE_PROJECT_ID=your-project-id
+   VITE_FIREBASE_STORAGE_BUCKET=your-project.appspot.com
+   VITE_FIREBASE_MESSAGING_SENDER_ID=123456789
+   VITE_FIREBASE_APP_ID=1:123456789:web:abcdef
+   ```
+
+3. The `.env` file is already in `.gitignore` so it won't be committed to GitHub
+
+**Note**: The `env-config.js` file automatically loads configuration from either `env.js` or Vite's `import.meta.env`
 
 ## Step 7: Test Your Setup
 

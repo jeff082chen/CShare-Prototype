@@ -1492,8 +1492,8 @@ async function savePreferences(event) {
     };
 
     const maxPrice = maxPriceValue === '' ? null : parseFloat(maxPriceValue);
-    const dateFrom = dateFromStr ? new Date(dateFromStr) : null;
-    const dateTo = dateToStr ? new Date(dateToStr) : null;
+    const dateFrom = dateFromStr ? new Date(dateFromStr + 'T00:00:00') : null;
+    const dateTo = dateToStr ? new Date(dateToStr + 'T00:00:00') : null;
 
     try {
         const prefDocRef = doc(db, 'users', currentUser.uid, 'preferences', 'default');
@@ -1654,8 +1654,9 @@ async function submitBookingRequest(event) {
         return;
     }
 
-    const startDate = new Date(startDateStr);
-    const endDate = new Date(endDateStr);
+    // Parse dates in local timezone to avoid timezone offset issues
+    const startDate = new Date(startDateStr + 'T00:00:00');
+    const endDate = new Date(endDateStr + 'T00:00:00');
 
     // Validate dates - allow same-day booking
     if (endDate < startDate) {
@@ -1680,7 +1681,11 @@ async function submitBookingRequest(event) {
         if (availability.type === 'dateRange') {
             if (availability.startDate) {
                 const itemStartDate = availability.startDate.toDate();
-                if (startDate < itemStartDate) {
+                // Only compare dates, not times
+                const itemStartDateOnly = new Date(itemStartDate.getFullYear(), itemStartDate.getMonth(), itemStartDate.getDate());
+                const startDateOnly = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+
+                if (startDateOnly < itemStartDateOnly) {
                     alert(`Item is only available from ${itemStartDate.toLocaleDateString()}`);
                     return;
                 }
@@ -1688,7 +1693,11 @@ async function submitBookingRequest(event) {
 
             if (availability.endDate) {
                 const itemEndDate = availability.endDate.toDate();
-                if (endDate > itemEndDate) {
+                // Only compare dates, not times
+                const itemEndDateOnly = new Date(itemEndDate.getFullYear(), itemEndDate.getMonth(), itemEndDate.getDate());
+                const endDateOnly = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
+
+                if (endDateOnly > itemEndDateOnly) {
                     alert(`Item is only available until ${itemEndDate.toLocaleDateString()}`);
                     return;
                 }
@@ -1697,8 +1706,11 @@ async function submitBookingRequest(event) {
             // Recurring type only allows same-day borrowing
             const availableDays = availability.daysOfWeek || [];
 
-            // Check if it's same-day booking
-            if (startDate.toDateString() !== endDate.toDateString()) {
+            // Check if it's same-day booking using date string comparison
+            const startDateOnly = startDate.toISOString().split('T')[0];
+            const endDateOnly = endDate.toISOString().split('T')[0];
+
+            if (startDateOnly !== endDateOnly) {
                 const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                 const availableDayNames = availableDays.map(d => dayNames[d]).join(', ');
                 alert(`This item only allows same-day borrowing on: ${availableDayNames}. Please select the same date for pickup and return.`);
@@ -1814,8 +1826,8 @@ function collectAvailabilityData(prefix = '') {
 
         const availability = {
             type: 'dateRange',
-            startDate: availableFromStr ? Timestamp.fromDate(new Date(availableFromStr)) : null,
-            endDate: availableUntilStr ? Timestamp.fromDate(new Date(availableUntilStr)) : null
+            startDate: availableFromStr ? Timestamp.fromDate(new Date(availableFromStr + 'T00:00:00')) : null,
+            endDate: availableUntilStr ? Timestamp.fromDate(new Date(availableUntilStr + 'T00:00:00')) : null
         };
 
         // Validate dates

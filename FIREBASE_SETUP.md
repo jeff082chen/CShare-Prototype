@@ -42,7 +42,7 @@ service cloud.firestore {
     function validDates() {
       return request.resource.data.startDate is timestamp &&
              request.resource.data.endDate is timestamp &&
-             request.resource.data.startDate < request.resource.data.endDate;
+             request.resource.data.startDate <= request.resource.data.endDate;
     }
 
     function lockIdsValid() {

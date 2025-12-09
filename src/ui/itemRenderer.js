@@ -27,15 +27,6 @@ const db = firebaseService.getDb();
 export function renderItems(itemsToRender) {
     const grid = document.getElementById('itemsGrid');
 
-    // Update cache with ranking index
-    const rankingIndex = {};
-    itemsToRender.forEach(item => {
-        if (item?.id) {
-            rankingIndex[item.id] = item;
-        }
-    });
-    cache.setRankingIndex(rankingIndex);
-
     if (itemsToRender.length === 0) {
         grid.innerHTML = `
             <div class="empty-state">
@@ -46,21 +37,74 @@ export function renderItems(itemsToRender) {
         return;
     }
 
-    grid.innerHTML = itemsToRender.map(item => {
-        const descriptionPreview = (item.description || '').substring(0, 80);
-        const matchSection = renderMatchBreakdown(item);
-        return `
-            <div class="item-card" onclick="showItemDetail('${item.id}')">
-                <div class="item-emoji">${item.emoji || '📦'}</div>
-                <h3>${item.name}</h3>
-                <span class="item-category">${item.category}</span>
-                <p>${descriptionPreview}...</p>
-                <div class="item-price">${formatPrice(item.price)}</div>
-                ${matchSection}
-                <div class="item-owner">Listed by ${item.ownerName}</div>
+    // Update cache with ranking index
+    const rankingIndex = {};
+    itemsToRender.forEach(item => {
+        if (item?.id) {
+            rankingIndex[item.id] = item;
+        }
+    });
+    cache.setRankingIndex(rankingIndex);
+
+    // Group items by category (preserve first-seen order)
+    const categoryOrder = [];
+    const grouped = {};
+    itemsToRender.forEach(item => {
+        const cat = item.category || 'Other';
+        if (!grouped[cat]) {
+            grouped[cat] = [];
+            categoryOrder.push(cat);
+        }
+        grouped[cat].push(item);
+    });
+
+    // Build category jump nav
+    const nav = categoryOrder.length > 1
+        ? `
+            <div class="category-nav">
+                ${categoryOrder.map(cat => {
+                    const slug = cat.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+                    return `<a class="category-pill" href="#cat-${slug}">${cat} (${grouped[cat].length})</a>`;
+                }).join('')}
             </div>
+        `
+        : '';
+
+    const sections = categoryOrder.map(cat => {
+        const slug = cat.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        const cards = grouped[cat].map(item => {
+            const descriptionPreview = (item.description || '').substring(0, 80);
+            const matchSection = renderMatchBreakdown(item);
+            return `
+                <div class="item-card" onclick="showItemDetail('${item.id}')">
+                    <div class="item-emoji">${item.emoji || '📦'}</div>
+                    <h3>${item.name}</h3>
+                    <span class="item-category">${item.category}</span>
+                    <p>${descriptionPreview}...</p>
+                    <div class="item-price">${formatPrice(item.price)}</div>
+                    ${matchSection}
+                    <div class="item-owner">Listed by ${item.ownerName}</div>
+                </div>
+            `;
+        }).join('');
+
+        return `
+            <section id="cat-${slug}" class="category-section">
+                <div class="category-header">
+                    <h3>${cat}</h3>
+                    <span class="category-count">${grouped[cat].length} item${grouped[cat].length === 1 ? '' : 's'}</span>
+                </div>
+                <div class="items-grid category-grid">
+                    ${cards}
+                </div>
+            </section>
         `;
     }).join('');
+
+    grid.innerHTML = `
+        ${nav}
+        ${sections}
+    `;
 }
 
 /**
